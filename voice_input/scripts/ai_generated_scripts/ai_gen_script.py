@@ -3,31 +3,23 @@ import Part
 import math
 doc = App.newDocument('Model')
 
+_spur_gear_outer_r = 4.0 / 2
+_spur_gear_root_r = 3.12 / 2
+_spur_gear_pitch = 2 * math.pi / 10
+_spur_gear_pts = []
+for i in range(10):
+    _a = i * _spur_gear_pitch
+    for _off, _r in [(-0.46, _spur_gear_root_r), (-0.22, _spur_gear_outer_r), (0.22, _spur_gear_outer_r), (0.46, _spur_gear_root_r)]:
+        _ang = _a + _off * _spur_gear_pitch
+        _spur_gear_pts.append(App.Vector(_r * math.cos(_ang), _r * math.sin(_ang), 0))
+_spur_gear_pts.append(_spur_gear_pts[0])
+_spur_gear_wire = Part.Wire([Part.LineSegment(_spur_gear_pts[i], _spur_gear_pts[i + 1]).toShape() for i in range(len(_spur_gear_pts) - 1)])
+spur_gear = Part.Face(_spur_gear_wire).extrude(App.Vector(0, 0, 3.0))
+_spur_gear_bore = Part.makeCylinder(0.88 / 2, 3.0 + 0.2)
+_spur_gear_bore.translate(App.Vector(0, 0, -0.1))
+spur_gear = spur_gear.cut(_spur_gear_bore)
 
-
-# Create the cylinder for the hex bolt shaft
-shaft_radius = 4
-shaft_height = 40
-shaft = Part.makeCylinder(shaft_radius, shaft_height)
-
-# Create the HEX WIRE pattern for the head of the hex bolt
-head_radius = 8
-head_height = 8
-n_sides = 6
-hex_points = [App.Vector(head_radius * math.cos(math.pi / 2 + 2 * math.pi * i / n_sides),
-                         head_radius * math.sin(math.pi / 2 + 2 * math.pi * i / n_sides),
-                         0) for i in range(n_sides)]
-hex_points.append(hex_points[0])
-hex_wire = Part.Wire([Part.LineSegment(hex_points[i], hex_points[i+1]).toShape() for i in range(n_sides)])
-head_face = Part.Face(hex_wire).extrude(App.Vector(0, 0, head_height))
-
-# Translate the head to the correct position
-head_translation = App.Placement(App.Vector(0, 0, shaft_height), App.Rotation())
-head_translated = head_face.copy()
-head_translated.Placement *= head_translation
-
-# Fuse the shaft and the translated head
-final_shape = shaft.fuse(head_translated)
+final_shape = spur_gear
 
 feature = doc.addObject('Part::Feature', 'Shape')
 feature.Shape = final_shape

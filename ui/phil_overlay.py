@@ -28,6 +28,7 @@ macOS / Tk 9 threading rules:
 import threading
 import time
 import sys
+import json
 from pathlib import Path
 
 import customtkinter as ctk # type:ignore
@@ -241,9 +242,18 @@ class Phil_Overlay(ctk.CTk):
         """Switch Phil to preview state — show thumbnail + buttons."""
         self._last_thumb   = thumb_path
         self._last_request = user_request
+        preview_text = user_request
+        try:
+            from voice_input.Keys.config import ai_gen_folder
+            spec_path = ai_gen_folder / "last_spec.json"
+            if spec_path.exists():
+                data = json.loads(spec_path.read_text())
+                preview_text = data.get("description") or data.get("request") or user_request
+        except Exception:
+            preview_text = user_request
         self.phil.show_preview_state(
             thumb_path=thumb_path,
-            prompt_text=user_request,
+            prompt_text=preview_text,
             on_accept=self._on_accept,
             on_modify=self._on_modify,
             on_script=self._on_script,
