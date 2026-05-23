@@ -182,7 +182,13 @@ def execute_cad_scripts(script_name,user_request):
             # initialising the loop
             for attempt in range(1, max_attempts + 1):
                 print(f"Self Correction Triggered\nAttempt {attempt}/{max_attempts}")
-                new_code = self_corrector(script_path_use, error_message)
+                try:
+                    new_code = self_corrector(script_path_use, error_message)
+                except Exception as e:
+                    print(f"Self correction unavailable: {e}")
+                    with open(correction_log, "a") as file:
+                        file.write(f"\nSELF CORRECTION UNAVAILABLE:\n{e}\n")
+                    break
                 with open(script_path_use,"w") as file:
                     file.write(new_code)
                 print("Code Successfully Corrected")

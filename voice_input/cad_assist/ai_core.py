@@ -1,210 +1,589 @@
+"""Translator between user requests and generated FreeCAD scripts.
 
-''' the translator between ai and source code
-it takes stage manager's memory and voice / text and gives to api (ai) to get a perfect result '''
+This restores the JSON pipeline:
+prompt -> LLM -> JSON spec -> builder.py -> FreeCAD Python.
+"""
 
-# importing nessary modules
-from voice_input import stage_manager
+import json
 import os
-import requests
-from pathlib import Path
-from dotenv import load_dotenv # type: ignore
-from voice_input.Keys.config import ai_gen_script, output_location, ai_gen_folder
-
-
-# transition to external api to hardware run
-import ollama # type:ignore
-from voice_input.stage_manager import get_memory
-
-# saftey net import module
 import re
 
-# loading environment variables
+import ollama  # type: ignore
+from dotenv import load_dotenv  # type: ignore
+
+from voice_input import stage_manager
+from voice_input.Keys.config import ai_gen_folder
+from voice_input.cad_assist.builder import build_and_save
+
 load_dotenv()
 api_key = os.getenv("api_key")
 
-# create function to send prompt to ai i call it "The Translator"
-def translator(user_request):
-    # get memorry from stage manager
-    previous_memory = stage_manager.get_memory()
 
-    # create system instruction
-    # changed from {} to () 
-    # {} must have keys and values
-    # we are grouping system rules in ()
-    system_rule = (f"""You are a FreeCAD Python scripting expert.
-Return ONLY raw executable Python code. No markdown. No backticks. No comments. No print(). One statement per line.
- 
-=== REQUIRED HEADER (always first 4 lines) ===
-import FreeCAD as App
-import Part
-import math
-doc = App.newDocument('Model')
- 
-=== REQUIRED FOOTER (always last 4 lines) ===
-feature = doc.addObject('Part::Feature', 'Shape')
-feature.Shape = final_shape
-doc.recompute()
-feature.Shape.exportStep('{ai_gen_folder}/model.step')
- 
+SHAPE_PATTERNS = {
+    "sg90_gear_arm": {
+        "description": (
+            "Make a 4 mm outside-diameter spur gear with exactly 10 teeth and "
+            "3 mm thickness.\n\n"
+            "Add a separate SG90-compatible robotic servo arm: 28 mm long, "
+            "5 mm wide, 3 mm thick, with a 7 mm hub, a 4.8 mm 21-spline "
+            "shaft bore, 1.8 mm center screw bore, and repeated 1.4 mm "
+            "mounting holes.\n\n"
+            "Place the arm beside the gear so both parts are visible in preview."
+        ),
+        "parts": [
+            {
+                "type": "spur_gear",
+                "name": "ten_tooth_gear",
+                "diameter": 4,
+                "root_diameter": 3.12,
+                "teeth": 10,
+                "thickness": 3,
+                "bore_diameter": 0.9,
+            },
+            {
+                "type": "sg90_servo_arm",
+                "name": "sg90_robotic_arm",
+                "length": 28,
+                "width": 5,
+                "thickness": 3,
+                "hub_diameter": 7,
+                "shaft_bore_diameter": 4.8,
+                "shaft_minor_diameter": 4.35,
+                "shaft_spline_teeth": 21,
+                "screw_bore_diameter": 1.8,
+                "mounting_hole_diameter": 1.4,
+                "mounting_hole_spacing": 5,
+                "translate": [12, 0, 0],
+            },
+        ],
+        "operations": [{"type": "fuse_all"}],
+    },
+    "ten_tooth_gear": {
+        "description": (
+            "Make a 4 mm outside-diameter spur gear with exactly 10 teeth, "
+            "3 mm thickness, and a small centered bore."
+        ),
+        "parts": [
+            {
+                "type": "spur_gear",
+                "name": "ten_tooth_gear",
+                "diameter": 4,
+                "root_diameter": 3.12,
+                "teeth": 10,
+                "thickness": 3,
+                "bore_diameter": 0.9,
+            },
+        ],
+        "operations": [{"type": "assign", "part": "ten_tooth_gear"}],
+    },
+    "sg90_servo_arm": {
+        "description": (
+            "Make an SG90-compatible robotic servo arm: 28 mm long, 5 mm wide, "
+            "3 mm thick, with a 7 mm hub, a 4.8 mm 21-spline shaft bore, "
+            "1.8 mm center screw bore, and repeated 1.4 mm mounting holes."
+        ),
+        "parts": [
+            {
+                "type": "sg90_servo_arm",
+                "name": "sg90_robotic_arm",
+                "length": 28,
+                "width": 5,
+                "thickness": 3,
+                "hub_diameter": 7,
+                "shaft_bore_diameter": 4.8,
+                "shaft_minor_diameter": 4.35,
+                "shaft_spline_teeth": 21,
+                "screw_bore_diameter": 1.8,
+                "mounting_hole_diameter": 1.4,
+                "mounting_hole_spacing": 5,
+            },
+        ],
+        "operations": [{"type": "assign", "part": "sg90_robotic_arm"}],
+    },
+    "l_bracket": {
+        "description": (
+            "Make an L bracket with a horizontal base, vertical wall, and one "
+            "mounting hole through each face."
+        ),
+        "parts": [
+            {
+                "type": "l_bracket",
+                "name": "l_bracket",
+                "length": 30,
+                "width": 18,
+                "height": 30,
+                "thickness": 3,
+                "hole_diameter": 4,
+            },
+        ],
+        "operations": [{"type": "assign", "part": "l_bracket"}],
+    },
+    "flange": {
+        "description": (
+            "Make a circular flange with a center bore and four bolt holes on "
+            "a bolt circle."
+        ),
+        "parts": [
+            {
+                "type": "flange",
+                "name": "flange",
+                "outer_diameter": 30,
+                "inner_diameter": 10,
+                "thickness": 5,
+                "bolt_count": 4,
+                "bolt_diameter": 3,
+                "bolt_circle_diameter": 22,
+            },
+        ],
+        "operations": [{"type": "assign", "part": "flange"}],
+    },
+    "plate": {
+        "description": "Make a rectangular mounting plate with corner holes.",
+        "parts": [
+            {
+                "type": "plate",
+                "name": "mounting_plate",
+                "length": 40,
+                "width": 20,
+                "thickness": 3,
+                "holes": [
+                    {"x": 5, "y": 5, "diameter": 3},
+                    {"x": 35, "y": 5, "diameter": 3},
+                    {"x": 5, "y": 15, "diameter": 3},
+                    {"x": 35, "y": 15, "diameter": 3},
+                ],
+            },
+        ],
+        "operations": [{"type": "assign", "part": "mounting_plate"}],
+    },
+    "shaft": {
+        "description": "Make a cylindrical shaft with an optional flat keyway.",
+        "parts": [
+            {
+                "type": "shaft",
+                "name": "shaft",
+                "diameter": 8,
+                "length": 40,
+                "keyway": True,
+            },
+        ],
+        "operations": [{"type": "assign", "part": "shaft"}],
+    },
+    "aeroplane": {
+        "parts": [
+            {
+                "type": "cylinder",
+                "name": "fuselage",
+                "r": 8,
+                "h": 80,
+                "rotate": {"axis": [0, 1, 0], "angle": 90},
+            },
+            {
+                "type": "box",
+                "name": "left_wing",
+                "l": 20,
+                "w": 40,
+                "h": 2,
+                "translate": [30, 0, -1],
+            },
+            {
+                "type": "box",
+                "name": "right_wing",
+                "l": 20,
+                "w": 40,
+                "h": 2,
+                "translate": [30, -40, -1],
+            },
+            {
+                "type": "box",
+                "name": "tail_fin",
+                "l": 10,
+                "w": 2,
+                "h": 15,
+                "translate": [65, -1, 0],
+            },
+        ],
+        "operations": [{"type": "fuse_all"}],
+    },
+    "bolt": {
+        "parts": [
+            {"type": "hex_prism", "name": "head", "r": 8, "h": 8},
+            {
+                "type": "cylinder",
+                "name": "shaft",
+                "r": 4,
+                "h": 40,
+                "translate": [0, 0, 8],
+            },
+        ],
+        "operations": [{"type": "fuse_all"}],
+    },
+    "pipe": {
+        "parts": [
+            {
+                "type": "pipe",
+                "name": "pipe_body",
+                "r_outer": 10,
+                "r_inner": 8,
+                "h": 60,
+            },
+        ],
+        "operations": [{"type": "assign", "part": "pipe_body"}],
+    },
+}
+
+SHAPE_KEYWORDS = {
+    "sg90_gear_arm": [
+        "sg90 servo",
+        "sg90",
+        "servo motor",
+        "servo moto",
+        "robotic arm",
+        "gear shaft",
+    ],
+    "ten_tooth_gear": ["10 teeth", "ten teeth", "small gear", "spur gear", "gear"],
+    "sg90_servo_arm": ["servo arm", "servo horn"],
+    "l_bracket": ["l bracket", "angle bracket", "corner bracket"],
+    "flange": ["flange", "bolt circle", "bolt holes"],
+    "plate": ["plate", "mounting plate", "base plate"],
+    "shaft": ["shaft", "axle", "keyway"],
+    "aeroplane": ["aeroplane", "airplane", "plane", "aircraft"],
+    "bolt": ["bolt", "hex bolt", "screw"],
+    "pipe": ["pipe", "tube", "hollow cylinder"],
+}
+
+
+def get_pattern_json(user_request):
+    req = user_request.lower()
+    if "gear" in req and any(token in req for token in ("sg90", "servo", "robotic arm")):
+        return SHAPE_PATTERNS["sg90_gear_arm"]
+    for shape, keywords in SHAPE_KEYWORDS.items():
+        if any(keyword in req for keyword in keywords):
+            return SHAPE_PATTERNS[shape]
+    return None
+
+
+JSON_SYSTEM_RULE = """You are a FreeCAD 3D model spec generator.
+Return ONLY a valid JSON object. No markdown. No backticks. No explanation.
+
+=== OUTPUT FORMAT ===
+{
+  "parts": [
+    {
+      "type": "<primitive>",
+      "name": "<unique_name>",
+      "... dimensions ...": "...",
+      "translate": [x, y, z],
+      "rotate": {"axis": [ax,ay,az], "angle": deg},
+      "mirror": {"source": "<name>", "axis": [ax,ay,az]}
+    }
+  ],
+  "operations": [
+    {"type": "fuse_all"}
+    OR {"type": "fuse", "parts": ["a","b","c"]}
+    OR {"type": "cut", "base": "a", "cutters": ["b","c"]}
+    OR {"type": "assign", "part": "a"}
+  ]
+}
+
 === PRIMITIVES ===
-Part.makeBox(L, W, H)                          # corner at origin
-Part.makeCylinder(R, H)                        # along Z-axis by default
-Part.makeSphere(R)
-Part.makeCone(R1, R2, H)
-Part.makeTorus(R_major, R_tube)
- 
-=== TRANSFORMS ===
-shape.translate(App.Vector(x, y, z))
-shape.rotate(App.Vector(0,0,0), App.Vector(ax,ay,az), angle_deg)
-App.Placement(App.Vector(x,y,z), App.Rotation(App.Vector(ax,ay,az), angle_deg))
- 
-=== BOOLEANS ===
-final_shape = a.fuse(b).fuse(c)                # always chain, never leave floating parts
-final_shape = base.cut(h1).cut(h2)             # chain cuts the same way
-common = a.common(b)
- 
-=== CENTERING FORMULAS ===
-# Box center:            (L/2, W/2, H/2)
-# Hole center in box:    translate hole to (L/2, W/2, 0) before cut
-# Corner hole offsets:   offset = R_hole*2 + 2   ->  (offset, offset), (L-offset, offset), (offset, W-offset), (L-offset, W-offset)
-# Fuselage (horizontal): makeCylinder then rotate 90° around Y-axis
- 
-=== ALIGNMENT RULES ===
-- Fuse parts touch if bounding boxes overlap by >= 0.1 mm
-- Default: align secondary part centers to main body center (Y=0)
-- Use unique descriptive names per part (fuselage, left_wing, right_wing, etc.)
- 
-=== PATTERNS ===
- 
-# Hex prism (side length r, height h):
-pts = [App.Vector(r*math.cos(math.pi/2 + 2*math.pi*i/6), r*math.sin(math.pi/2 + 2*math.pi*i/6), 0) for i in range(6)]
-pts.append(pts[0])
-wire = Part.Wire([Part.LineSegment(pts[i], pts[i+1]).toShape() for i in range(6)])
-solid = Part.Face(wire).extrude(App.Vector(0, 0, h))
- 
-# Hollow hex tube (wall thickness t):
-inner_r = r - t
-# (repeat hex prism above for outer_solid and inner_solid, then:)
-hollow_hex = outer_solid.cut(inner_solid)
- 
-# Polar array (n copies around Z):
-copies = [shape.copy() for i in range(n)]
-for i, c in enumerate(copies): c.rotate(App.Vector(0,0,0), App.Vector(0,0,1), i * 360/n)
-result = Part.makeCompound(copies)
- 
-# Linear array (n copies along X, spacing s):
-copies = [shape.copy() for i in range(n)]
-for i, c in enumerate(copies): c.translate(App.Vector(i*s, 0, 0))
-result = Part.makeCompound(copies)
- 
-# Sweep (circle profile, straight path, length L):
-profile = Part.Wire(Part.makeCircle(R, App.Vector(0,0,0), App.Vector(0,0,1)))
-path    = Part.Wire([Part.LineSegment(App.Vector(0,0,0), App.Vector(0,0,L)).toShape()])
-result  = path.makePipeShell([profile], True, False)
- 
-# Loft (circle r1 at z=0, circle r2 at z=H):
-w1 = Part.Wire(Part.makeCircle(r1, App.Vector(0,0,0), App.Vector(0,0,1)))
-w2 = Part.Wire(Part.makeCircle(r2, App.Vector(0,0,H), App.Vector(0,0,1)))
-result = Part.makeLoft([w1, w2], True)
- 
-# Fillet / Chamfer:
-shape.makeFillet(radius, shape.Edges)
-shape.makeChamfer(size, shape.Edges)
- 
-# Mirror:
-shape.mirror(App.Vector(0,0,0), App.Vector(1,0,0))
- 
+box        -> l, w, h
+cylinder   -> r, h
+sphere     -> r
+cone       -> r1, r2, h
+torus      -> r1, r2
+hex_prism  -> r (side length), h
+pipe       -> r_outer, r_inner, h
+plate      -> length, width, thickness, holes[{x,y,diameter}]
+l_bracket  -> length, width, height, thickness, hole_diameter
+flange     -> outer_diameter, inner_diameter, thickness, bolt_count, bolt_diameter, bolt_circle_diameter
+shaft      -> diameter, length, keyway
+spur_gear  -> diameter, root_diameter, teeth, thickness, bore_diameter
+sg90_servo_arm -> length, width, thickness, hub_diameter, shaft_bore_diameter, shaft_spline_teeth, screw_bore_diameter, mounting_hole_diameter
+
+=== TRANSFORM RULES ===
+- rotate axis [0,1,0] angle 90 = horizontal along X-axis (use for fuselage)
+- wings span along Y-axis to be visible outside fuselage radius
+- translate moves from origin after creation
+
 === HARD RULES ===
-- NEVER skip doc = App.newDocument('Model')
-- NEVER use math functions unless geometry explicitly requires it (e.g. hex angles)
-- NEVER use Part.makeCompound for assemblies that must be one solid — use .fuse() chain
-- NEVER call addObject() on a shape; only on doc
-- NEVER use App.ActiveDocument.removeObject()
-- COUNTING: generate EXACTLY N sides when asked. Hexagon = range(6). No substitutions.
-- Re-create all previous context objects before adding new ones
-- final_shape MUST be assigned before the footer
+- ALWAYS include at least one operation
+- fuse_all fuses every part in order
+- For hollow shapes use type "pipe"
+- Prefer plate, l_bracket, flange, shaft, spur_gear, and sg90_servo_arm when the request matches those mechanical parts
+- Output ONLY the JSON object, nothing else
 """
+
+
+def validate_json_spec(spec: dict) -> bool:
+    if "parts" not in spec or not isinstance(spec["parts"], list):
+        return False
+    if "operations" not in spec or not isinstance(spec["operations"], list):
+        return False
+    for part in spec["parts"]:
+        if "type" not in part or "name" not in part:
+            return False
+    return True
+
+
+def extract_json(raw: str) -> dict:
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    start = clean.find("{")
+    end = clean.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON object found in LLM response")
+    return json.loads(clean[start:end])
+
+
+def _save_json_spec(spec: dict, user_request: str):
+    json_path = ai_gen_folder / "last_spec.json"
+    with open(json_path, "w") as file:
+        json.dump(
+            {
+                "request": user_request,
+                "description": spec.get("description", user_request),
+                "spec": spec,
+            },
+            file,
+            indent=2,
+        )
+    print(f"[AI Core] JSON spec saved -> {json_path}")
+
+
+def _numbers(text: str) -> list[float]:
+    return [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
+
+
+def _first_number_near(
+    text: str, words: tuple[str, ...], default: float, allow_before: bool = True
+) -> float:
+    for word in words:
+        match = re.search(rf"{word}\D{{0,20}}(\d+(?:\.\d+)?)", text)
+        if match:
+            return float(match.group(1))
+        if allow_before:
+            match = re.search(rf"(\d+(?:\.\d+)?)\s*(?:mm|millimeter|millimeters)?\s+{word}", text)
+            if match:
+                return float(match.group(1))
+    return default
+
+
+def _offline_spec(user_request: str) -> dict:
+    req = user_request.lower()
+
+    if any(token in req for token in ("sg90", "servo arm", "servo horn")) and "gear" not in req:
+        return SHAPE_PATTERNS["sg90_servo_arm"]
+
+    if "gear" in req:
+        diameter = _first_number_near(req, ("diameter", "od", "outside"), 20, allow_before=False)
+        thickness = _first_number_near(req, ("thick", "thickness", "height"), 5, allow_before=True)
+        teeth_match = (
+            re.search(r"(\d+(?:\.\d+)?)\s*(?:teeth|tooth)", req)
+            or re.search(r"(?:teeth|tooth)\D{0,8}(\d+(?:\.\d+)?)", req)
+        )
+        teeth = int(float(teeth_match.group(1))) if teeth_match else 16
+        spec = {
+            "description": (
+                f"Make a {diameter:g} mm outside-diameter spur gear with exactly "
+                f"{teeth} teeth and {thickness:g} mm thickness."
+            ),
+            "parts": [
+                {
+                    "type": "spur_gear",
+                    "name": "spur_gear",
+                    "diameter": diameter,
+                    "root_diameter": diameter * 0.78,
+                    "teeth": teeth,
+                    "thickness": thickness,
+                    "bore_diameter": max(0.8, diameter * 0.22),
+                }
+            ],
+            "operations": [{"type": "assign", "part": "spur_gear"}],
+        }
+        if any(token in req for token in ("sg90", "servo", "robotic arm", "servo arm")):
+            return SHAPE_PATTERNS["sg90_gear_arm"]
+        return spec
+
+    if any(token in req for token in ("flange", "bolt circle")):
+        outer = _first_number_near(req, ("outer", "outside", "diameter"), 30, allow_before=False)
+        inner = _first_number_near(req, ("inner", "bore", "hole"), 10, allow_before=False)
+        thick = _first_number_near(req, ("thick", "thickness"), 5, allow_before=False)
+        bolt_count = int(_first_number_near(req, ("bolt", "holes"), 4))
+        return {
+            "description": (
+                f"Make a {outer:g} mm flange, {thick:g} mm thick, with a "
+                f"{inner:g} mm center bore and {bolt_count} bolt holes."
+            ),
+            "parts": [
+                {
+                    "type": "flange",
+                    "name": "flange",
+                    "outer_diameter": outer,
+                    "inner_diameter": inner,
+                    "thickness": thick,
+                    "bolt_count": bolt_count,
+                    "bolt_diameter": 3,
+                    "bolt_circle_diameter": outer * 0.72,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "flange"}],
+        }
+
+    if any(token in req for token in ("bracket", "l bracket", "angle bracket")):
+        nums = _numbers(req)
+        length = nums[0] if len(nums) > 0 else 30
+        width = nums[1] if len(nums) > 1 else 18
+        height = nums[2] if len(nums) > 2 else 30
+        thick = _first_number_near(req, ("thick", "thickness"), 3)
+        return {
+            "description": (
+                f"Make an L bracket {length:g} x {width:g} x {height:g} mm "
+                f"with {thick:g} mm wall thickness and mounting holes."
+            ),
+            "parts": [
+                {
+                    "type": "l_bracket",
+                    "name": "l_bracket",
+                    "length": length,
+                    "width": width,
+                    "height": height,
+                    "thickness": thick,
+                    "hole_diameter": 4,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "l_bracket"}],
+        }
+
+    if any(token in req for token in ("plate", "base")):
+        nums = _numbers(req)
+        length = nums[0] if len(nums) > 0 else 40
+        width = nums[1] if len(nums) > 1 else 20
+        thick = _first_number_near(req, ("thick", "thickness"), nums[2] if len(nums) > 2 else 3)
+        hole_d = _first_number_near(req, ("hole", "holes"), 3)
+        inset = max(hole_d, 4)
+        return {
+            "description": (
+                f"Make a {length:g} x {width:g} x {thick:g} mm mounting plate "
+                f"with four {hole_d:g} mm corner holes."
+            ),
+            "parts": [
+                {
+                    "type": "plate",
+                    "name": "mounting_plate",
+                    "length": length,
+                    "width": width,
+                    "thickness": thick,
+                    "holes": [
+                        {"x": inset, "y": inset, "diameter": hole_d},
+                        {"x": length - inset, "y": inset, "diameter": hole_d},
+                        {"x": inset, "y": width - inset, "diameter": hole_d},
+                        {"x": length - inset, "y": width - inset, "diameter": hole_d},
+                    ],
+                }
+            ],
+            "operations": [{"type": "assign", "part": "mounting_plate"}],
+        }
+
+    if any(token in req for token in ("shaft", "axle")):
+        diameter = _first_number_near(req, ("diameter", "dia"), 8, allow_before=False)
+        length = _first_number_near(req, ("long", "length"), 40, allow_before=False)
+        return {
+            "description": (
+                f"Make a {diameter:g} mm diameter, {length:g} mm long shaft"
+                f"{' with a keyway' if 'keyway' in req else ''}."
+            ),
+            "parts": [
+                {
+                    "type": "shaft",
+                    "name": "shaft",
+                    "diameter": diameter,
+                    "length": length,
+                    "keyway": "keyway" in req,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "shaft"}],
+        }
+
+    nums = _numbers(req)
+    l = nums[0] if len(nums) > 0 else 10
+    w = nums[1] if len(nums) > 1 else l
+    h = nums[2] if len(nums) > 2 else l
+    return {
+        "description": f"Make a simple {l:g} x {w:g} x {h:g} mm solid block.",
+        "parts": [{"type": "box", "name": "block", "l": l, "w": w, "h": h}],
+        "operations": [{"type": "assign", "part": "block"}],
+    }
+
+
+def translator(user_request):
+    previous_memory = stage_manager.get_memory()
+    req = user_request.lower()
+
+    offline_first_tokens = (
+        "gear",
+        "flange",
+        "bracket",
+        "plate",
+        "shaft",
+        "axle",
+        "servo arm",
+        "servo horn",
+    )
+    if any(token in req for token in offline_first_tokens):
+        print("[AI Core] Mechanical task - using deterministic builder")
+        spec = _offline_spec(user_request)
+        try:
+            filename = build_and_save(spec)
+            _save_json_spec(spec, user_request)
+            return filename
+        except Exception as exc:
+            print(f"[AI Core] Deterministic build failed: {exc}, falling back to LLM")
+
+    pattern = get_pattern_json(user_request)
+    if pattern:
+        print("[AI Core] Known shape - using pattern directly")
+        try:
+            filename = build_and_save(pattern)
+            _save_json_spec(pattern, user_request)
+            return filename
+        except Exception as exc:
+            print(f"[AI Core] Pattern build failed: {exc}, falling back to LLM")
+
+    user_prompt = (
+        f"Previous build context:\n{previous_memory}\n\n"
+        f"Build request: {user_request}"
     )
 
-    # adding code validator / auto fixer
-    def validator(code):
-        # functional footer checks
-        if "App.newDocument" not in code:
-            code = code.replace("import math","import math\n\ndoc=App.newDocument('Model')")
-        if "doc.addObject" not in code:
-            code += "\nfeature = doc.addObject('Part::Feature', 'Shape')"
-        if "feature.Shape = final_shape" not in code:
-            code += "\nfeature.Shape = final_shape"
-        if "doc.recompute" not in code:
-            code += "\ndoc.recompute()"
-        if "exportStep" not in code:
-            code += f"\nfeature.Shape.exportStep('{ai_gen_folder}/model.step')"            
-        # variable checker
-        if "final_shape" not in code:
-            raise Exception("Ai Forgots to define final_shape")
-
-        return code
-
-    
-    # send prompt to ai via ollama (local LLM)
-    # sending it to reasoning model currently "phi4-mini" is the model for reasoning
-
-    # using qwen2.5 coder model to generate python script based on the plan 
     print("Builder Model Active...")
-    print(f"[Qwen 2.5]: Generating Code...")
-    response = ollama.chat(model="qwen2.5-coder:7b", messages=[
-        {"role":"system", 
-        "content":system_rule
-        },
-        {"role":"user",
-        "content":f"Existing Geometry Plan:\n{previous_memory}\n\nUpdate to apply:{user_request}"
-        }
-    ])
-    print("\n[Builder Model]: Code Generated.")
-    
-    
-    # 1.extract content from ollama
-    raw_code = response.message.content
+    print("[Qwen 2.5]: Generating JSON spec...")
 
-    # 2.clean python code (removing fen fencess such as '''python and '')
-    clean_code = raw_code.replace("```python", "").replace("```py", "").replace("```", "").strip()
-
-    # 3.split safety net and join statement onto seperate lines
-    clean_code = re.sub(r';\s*', '\n', clean_code)
-
-    # 4. saftey net injection
-    # injects header if only missing
-    print("injecting header (force)")
-    ai_lines = clean_code.splitlines()
-    body_code = [
-        l for l in ai_lines
-        if not any(x in l for x in ["import FreeCAD", "import Part", "import math", "App.newDocument","setActiveDocument"])
-    ]
-    # adding header
-    header = (
-        "import FreeCAD as App\n"
-        "import Part\n"
-        "import math\n"
-        "doc = App.newDocument('Model')\n\n"
-        )
-
-    final_code = header + "\n".join(body_code)
-
-    # validation phase (valaditing all of the code fairness)
     try:
-        final_executable_code = validator(final_code)
-    except Exception as e:
-        print(f"Validation Error: {e}")
+        response = ollama.chat(
+            model="qwen2.5-coder:7b",
+            messages=[
+                {"role": "system", "content": JSON_SYSTEM_RULE},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = response.message.content
+        print("\n[Builder Model]: JSON received.")
+        spec = extract_json(raw)
+    except Exception as exc:
+        print(f"[AI Core] LLM path failed: {exc}")
+        print("[AI Core] Using offline mechanical fallback.")
+        spec = _offline_spec(user_request)
+
+    if not validate_json_spec(spec):
+        print("[AI Core] JSON spec invalid")
         return None
 
-    # start saving the file
+    _save_json_spec(spec, user_request)
 
-    # 5.save generated python script from runner.py
-    file_name = "ai_gen_script.py"
-    with open(ai_gen_script, "w") as file:
-        file.write(final_executable_code)
-    print(f"Script of ai generated Saved\n Location:{ai_gen_script}")
-    print("Qwen 2.5 successfully runned")
+    try:
+        filename = build_and_save(spec)
+    except Exception as exc:
+        print(f"[AI Core] Builder failed: {exc}")
+        return None
 
-    # returning the script
-    return file_name
+    print("Qwen 2.5 successfully ran (JSON pipeline)")
+    return filename
