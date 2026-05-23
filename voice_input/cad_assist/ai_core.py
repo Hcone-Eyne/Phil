@@ -18,6 +18,118 @@ from voice_input.cad_assist.builder import build_and_save
 load_dotenv()
 api_key = os.getenv("api_key")
 
+from datetime import datetime
+from pathlib import Path
+
+# ── Error Memory System ────────────────────────────────────────────────────────
+# This is the model's "mistake journal".
+# Every time the LLM returns bad output (wrong format, missing keys, hallucinated
+# structure), we log it here. Before every new generation, we read recent mistakes
+# and inject them into the prompt — so the model sees what it got wrong before
+# and avoids repeating those exact mistakes.
+# This is persistent across sessions — the model gets smarter over time.
+
+# error_memory.json  = LLM format/logic mistakes (this file)
+# correction.log.txt = FreeCAD runtime errors (separate, already exists)
+_ERROR_MEMORY_PATH = Path("/Users/enoch/Desktop/Free_Cad_Extension/voice_input/logs/error_memory.json")
+
+# How many past errors to inject per prompt
+# 5 is the sweet spot — enough to cover patterns, not enough to confuse 7B
+_MAX_ERRORS_TO_INJECT = 5
+
+
+def _load_error_memory() -> list:
+    """
+    Load all stored LLM mistakes from error_memory.json.
+    Returns empty list if file missing or corrupted — never crashes.
+    Each entry: {timestamp, error_type, bad_output_preview, lesson}
+    """
+    if not _ERROR_MEMORY_PATH.exists():
+        return []
+    try:
+        with open(_ERROR_MEMORY_PATH, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        # Corrupted file? Start fresh. Don't crash the whole app over this.
+        return []
+
+
+def _save_error_memory(errors: list):
+    """Write the updated error list back to disk. Creates directory if needed."""
+    _ERROR_MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_ERROR_MEMORY_PATH, "w") as f:
+        json.dump(errors, f, indent=2)
+
+
+def log_format_error(bad_output: str, error_type: str, lesson: str):
+    """
+    Record a new LLM mistake into the persistent error memory.
+
+    bad_output  — the raw string the model returned (stored truncated to 300 chars)
+    error_type  — short tag for the kind of mistake:
+                    'wrong_format'     = returned thoughts/steps instead of JSON
+                    'invalid_json'     = JSON parse failed
+                    'missing_parts_key'= JSON parsed but had wrong structure
+                    'geometry_fail'    = script ran but produced bad/empty geometry
+    lesson      — plain-English rule the model must learn:
+                    e.g. "Do not return thoughts/steps — return ONLY the raw JSON object"
+
+    Rotates at 30 entries max so the file never grows unbounded.
+    Called from: translator() when validate_json_spec() fails
+    """
+    errors = _load_error_memory()
+
+    new_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "error_type": error_type,
+        # Truncate so the memory file stays small and readable
+        "bad_output_preview": bad_output[:300].strip(),
+        "lesson": lesson,
+    }
+
+    errors.append(new_entry)
+
+    # Rotate: discard oldest beyond 30 so memory stays focused on recent behaviour
+    if len(errors) > 30:
+        errors = errors[-30:]
+
+    _save_error_memory(errors)
+    print(f"[ErrorMemory] Logged: {error_type} — {lesson[:60]}")
+
+
+def _build_error_memory_prompt() -> str:
+    """
+    Read the last N errors and format them as a prompt block.
+
+    This is the "injection" step — called every time before we send to the LLM.
+    The model reads its own past mistakes as part of the system context,
+    so it knows what NOT to do before it even starts generating.
+
+    Returns empty string on first run (no mistakes yet) — safe to concatenate.
+    Uses plain direct language because 7B models respond better to explicit
+    rules than structured JSON in the system prompt.
+    """
+    errors = _load_error_memory()
+    if not errors:
+        return ""  # First ever run — nothing to inject yet
+
+    # Only inject the most recent N to avoid prompt bloat
+    recent = errors[-_MAX_ERRORS_TO_INJECT:]
+
+    lines = ["\n=== YOUR PAST MISTAKES — DO NOT REPEAT ==="]
+    for i, entry in enumerate(recent, 1):
+        lines.append(f"{i}. [{entry['error_type']}] {entry['lesson']}")
+        preview = entry.get("bad_output_preview", "")
+        if preview:
+            # Show just enough of the bad output so the model recognises the pattern
+            lines.append(f"   You returned: {preview[:120]}...")
+    lines.append("=== END OF PAST MISTAKES ===\n")
+
+    return "\n".join(lines)
+
+
+
 
 SHAPE_PATTERNS = {
     "sg90_gear_arm": {
@@ -205,6 +317,23 @@ SHAPE_PATTERNS = {
         ],
         "operations": [{"type": "fuse_all"}],
     },
+    "lego_brick": {
+        "description": "Make a standard 4x2 Lego brick with hollow bottom and 8 studs.",
+        "parts": [
+            {
+                "type":           "lego_brick",
+                "name":           "lego_brick",
+                "studs_x":        4,
+                "studs_y":        2,
+                "stud_diameter":  4.8,
+                "stud_height":    1.8,
+                "plate_height":   9.6,
+                "wall_thickness": 1.2,
+                "hollow":         True,
+            }
+        ],
+        "operations": [{"type": "assign", "part": "lego_brick"}],
+    },
     "bolt": {
         "parts": [
             {"type": "hex_prism", "name": "head", "r": 8, "h": 8},
@@ -259,12 +388,19 @@ def get_pattern_json(user_request):
         return SHAPE_PATTERNS["sg90_gear_arm"]
     for shape, keywords in SHAPE_KEYWORDS.items():
         if any(keyword in req for keyword in keywords):
-            return SHAPE_PATTERNS[shape]
+            # Only use pattern if keyword is the main subject, not a feature mention
+            if _is_main_intent(req, tuple(keywords)):
+                return SHAPE_PATTERNS[shape]
     return None
 
 
 JSON_SYSTEM_RULE = """You are a FreeCAD 3D model spec generator.
-Return ONLY a valid JSON object. No markdown. No backticks. No explanation.
+
+CRITICAL: Your ENTIRE response must be a single raw JSON object.
+- NO thoughts, NO steps, NO code_changes, NO explanation
+- NO markdown, NO backticks, NO comments
+- Start with { and end with } — nothing before, nothing after
+- If you return anything other than raw JSON you have failed
 
 === OUTPUT FORMAT ===
 {
@@ -274,8 +410,7 @@ Return ONLY a valid JSON object. No markdown. No backticks. No explanation.
       "name": "<unique_name>",
       "... dimensions ...": "...",
       "translate": [x, y, z],
-      "rotate": {"axis": [ax,ay,az], "angle": deg},
-      "mirror": {"source": "<name>", "axis": [ax,ay,az]}
+      "rotate": {"axis": [ax,ay,az], "angle": deg}
     }
   ],
   "operations": [
@@ -302,16 +437,74 @@ spur_gear  -> diameter, root_diameter, teeth, thickness, bore_diameter
 sg90_servo_arm -> length, width, thickness, hub_diameter, shaft_bore_diameter, shaft_spline_teeth, screw_bore_diameter, mounting_hole_diameter
 
 === TRANSFORM RULES ===
-- rotate axis [0,1,0] angle 90 = horizontal along X-axis (use for fuselage)
-- wings span along Y-axis to be visible outside fuselage radius
-- translate moves from origin after creation
+- translate moves the part AFTER creation, from origin [0,0,0]
+- rotate axis [0,0,1] = spin around Z (vertical), [0,1,0] = tip forward, [1,0,0] = roll
+- to stack parts vertically, translate Z by the height of the part below
+- to cut a hole through a part, make the cutter cylinder slightly taller (+0.2) and offset Z by -0.1
 
 === HARD RULES ===
-- ALWAYS include at least one operation
-- fuse_all fuses every part in order
-- For hollow shapes use type "pipe"
-- Prefer plate, l_bracket, flange, shaft, spur_gear, and sg90_servo_arm when the request matches those mechanical parts
-- Output ONLY the JSON object, nothing else
+- ALWAYS use cylinder (not box) for round/circular features like studs, pins, holes, shafts
+- ALWAYS use pipe for hollow tubes — never cut a cylinder manually unless dimensions require it
+- NEVER use mirror — it causes geometry errors; instead place each part with translate
+- For hollow boxes (enclosures, shells): make outer box, make inner box slightly smaller, use cut operation
+- fuse combines solid parts; cut removes material; assign = single part output
+- Output ONLY the raw JSON object — no markdown, no backticks, no comments
+
+=== EXAMPLES ===
+
+--- Example 1: hollow cup (teaches: outer body + hollow interior via cut) ---
+Request: "Make a cylindrical cup 40mm tall 30mm diameter with 2mm walls"
+{
+  "parts": [
+    {"type": "cylinder", "name": "outer_body", "r": 15, "h": 40},
+    {"type": "cylinder", "name": "inner_cavity", "r": 13, "h": 38, "translate": [0, 0, 2]}
+  ],
+  "operations": [{"type": "cut", "base": "outer_body", "cutters": ["inner_cavity"]}]
+}
+
+--- Example 2: motor housing (teaches: multi-part assembly with shaft hole) ---
+Request: "Make a simple motor housing cylinder 50mm long 25mm outer diameter with 8mm shaft hole through center"
+{
+  "parts": [
+    {"type": "cylinder", "name": "housing_body", "r": 12.5, "h": 50},
+    {"type": "cylinder", "name": "shaft_hole", "r": 4, "h": 50.2, "translate": [0, 0, -0.1]},
+    {"type": "cylinder", "name": "front_cap", "r": 14, "h": 3},
+    {"type": "cylinder", "name": "rear_cap", "r": 14, "h": 3, "translate": [0, 0, 50]}
+  ],
+  "operations": [
+    {"type": "fuse", "parts": ["housing_body", "front_cap", "rear_cap"]},
+    {"type": "cut", "base": "housing_body", "cutters": ["shaft_hole"]}
+  ]
+}
+
+--- Example 3: T-bracket (teaches: multi-box fuse for L/T shapes) ---
+Request: "Make a T-shaped bracket 60mm wide 40mm tall 4mm thick"
+{
+  "parts": [
+    {"type": "box", "name": "horizontal_bar", "l": 60, "w": 4, "h": 8},
+    {"type": "box", "name": "vertical_bar", "l": 4, "w": 4, "h": 40, "translate": [28, 0, 8]}
+  ],
+  "operations": [{"type": "fuse_all"}]
+}
+
+--- Example 4: bearing seat (teaches: precise hollow cylinder with bolt holes) ---
+Request: "Make a bearing seat 20mm outer diameter 12mm inner bore 10mm thick with 4 bolt holes on a 17mm bolt circle"
+{
+  "parts": [
+    {"type": "flange", "name": "bearing_seat", "outer_diameter": 20, "inner_diameter": 12, "thickness": 10, "bolt_count": 4, "bolt_diameter": 2.5, "bolt_circle_diameter": 17}
+  ],
+  "operations": [{"type": "assign", "part": "bearing_seat"}]
+}
+
+--- Example 5: enclosure box (teaches: hollow rectangular shell via cut) ---
+Request: "Make a rectangular electronics enclosure 80x50x30mm with 2mm walls open at bottom"
+{
+  "parts": [
+    {"type": "box", "name": "outer_shell", "l": 80, "w": 50, "h": 30},
+    {"type": "box", "name": "inner_cavity", "l": 76, "w": 46, "h": 28, "translate": [2, 2, 2]}
+  ],
+  "operations": [{"type": "cut", "base": "outer_shell", "cutters": ["inner_cavity"]}]
+}
 """
 
 
@@ -504,6 +697,34 @@ def _offline_spec(user_request: str) -> dict:
             "operations": [{"type": "assign", "part": "shaft"}],
         }
 
+    if any(token in req for token in ("lego", "brick", "stud")):
+        grid_match = re.search(r"(\d+)\s*[xX×by]+\s*(\d+)", req)
+        if grid_match:
+            sx, sy = int(grid_match.group(1)), int(grid_match.group(2))
+        else:
+            sx = int(_first_number_near(req, ("wide", "cols", "columns"), 4))
+            sy = int(_first_number_near(req, ("long", "rows", "deep"), 2))
+        stud_d = _first_number_near(req, ("stud diameter", "diameter"), 4.8)
+        stud_h = _first_number_near(req, ("stud height",), 1.8)
+        hollow = "hollow" in req or "open" in req or True
+        return {
+            "description": f"Make a {sx}x{sy} Lego brick with hollow bottom.",
+            "parts": [
+                {
+                    "type":           "lego_brick",
+                    "name":           "lego_brick",
+                    "studs_x":        sx,
+                    "studs_y":        sy,
+                    "stud_diameter":  stud_d,
+                    "stud_height":    stud_h,
+                    "plate_height":   9.6,
+                    "wall_thickness": 1.2,
+                    "hollow":         hollow,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "lego_brick"}],
+        }
+
     nums = _numbers(req)
     l = nums[0] if len(nums) > 0 else 10
     w = nums[1] if len(nums) > 1 else l
@@ -515,6 +736,26 @@ def _offline_spec(user_request: str) -> dict:
     }
 
 
+def _is_main_intent(req: str, tokens: tuple) -> bool:
+    """
+    Returns True only if the request is PRIMARILY about one of the tokens —
+    not just mentioning it as a feature (e.g. 'shaft holes', 'bracket mount').
+    Checks that the token appears near the start or as the dominant noun.
+    """
+    import re
+    for token in tokens:
+        if token not in req:
+            continue
+        # Token must appear in first 40 chars OR be preceded by make/create/a/an/the
+        idx = req.find(token)
+        if idx < 40:
+            return True
+        preceding = req[max(0, idx - 15):idx]
+        if re.search(r"\b(make|create|build|generate|a|an|the)\s*$", preceding):
+            return True
+    return False
+
+
 def translator(user_request):
     previous_memory = stage_manager.get_memory()
     req = user_request.lower()
@@ -523,13 +764,17 @@ def translator(user_request):
         "gear",
         "flange",
         "bracket",
-        "plate",
         "shaft",
         "axle",
         "servo arm",
         "servo horn",
+        "lego",
+        "brick",
     )
-    if any(token in req for token in offline_first_tokens):
+
+    # Only bypass LLM if the request is PRIMARILY about one of these shapes
+    # e.g. "make a shaft" → yes. "mount with shaft holes" → no, send to LLM
+    if _is_main_intent(req, offline_first_tokens):
         print("[AI Core] Mechanical task - using deterministic builder")
         spec = _offline_spec(user_request)
         try:
@@ -554,27 +799,61 @@ def translator(user_request):
         f"Build request: {user_request}"
     )
 
+    # ── Inject error memory into system prompt ────────────────────────────────
+    # Read the model's past mistakes and append them to the system rules.
+    # On first run this returns "" so nothing changes.
+    # After any failure, the model will see what it did wrong last time.
+    error_memory_block = _build_error_memory_prompt()
+    system_prompt_with_memory = JSON_SYSTEM_RULE + error_memory_block
+
     print("Builder Model Active...")
     print("[Qwen 2.5]: Generating JSON spec...")
+    if error_memory_block:
+        print(f"[ErrorMemory] Injecting {min(_MAX_ERRORS_TO_INJECT, len(_load_error_memory()))} past mistakes into prompt")
 
+    # Keep the raw response so we can log it if validation fails
+    raw = ""
     try:
         response = ollama.chat(
             model="qwen2.5-coder:7b",
             messages=[
-                {"role": "system", "content": JSON_SYSTEM_RULE},
+                # Use the enriched system prompt that includes past mistakes
+                {"role": "system", "content": system_prompt_with_memory},
                 {"role": "user", "content": user_prompt},
             ],
         )
         raw = response.message.content
         print("\n[Builder Model]: JSON received.")
         spec = extract_json(raw)
+    except json.JSONDecodeError as exc:
+        # Model returned something but it wasn't valid JSON at all
+        # Log this so next time the model knows its JSON was unparseable
+        log_format_error(
+            bad_output=raw,
+            error_type="invalid_json",
+            lesson="Your response was not valid JSON. Return ONLY a raw JSON object starting with { and ending with }. No markdown, no backticks, no explanation.",
+        )
+        print(f"[AI Core] JSON parse failed: {exc} — using offline fallback")
+        spec = _offline_spec(user_request)
     except Exception as exc:
         print(f"[AI Core] LLM path failed: {exc}")
         print("[AI Core] Using offline mechanical fallback.")
         spec = _offline_spec(user_request)
 
     if not validate_json_spec(spec):
-        print("[AI Core] JSON spec invalid")
+        # Model returned valid JSON but wrong structure (e.g. thoughts/steps/code_changes)
+        # Log the specific keys it used so the lesson is concrete and recognisable
+        bad_keys = list(spec.keys()) if isinstance(spec, dict) else []
+        log_format_error(
+            bad_output=raw,
+            error_type="wrong_format",
+            lesson=(
+                f"You returned a JSON object with keys {bad_keys} instead of the required "
+                f"'parts' and 'operations' keys. ONLY return {{\"parts\": [...], \"operations\": [...]}}. "
+                f"No 'thoughts', no 'steps', no 'code_changes', no 'description' at root level."
+            ),
+        )
+        print("[AI Core] JSON spec invalid — logged to error memory")
         return None
 
     _save_json_spec(spec, user_request)
