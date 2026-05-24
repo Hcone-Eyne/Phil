@@ -6,7 +6,7 @@
 
 from voice_input.cad_assist.ai_core import translator
 from voice_input.cad_assist import runner
-import ollama
+from setup.llm_client import get_client  # unified LLM backend
 
 EXIT_COMMANDS = {"exit", "exits", "quit", "q"}
 
@@ -59,22 +59,18 @@ def self_corrector(script_path, error_message):
     with open(script_path, "r") as file:
         error_code = file.read()
 
-    fixing_prompt = (
-        f"The following FreeCAD script failed with an error.\n"
-        f"ERROR: {error_message}\n"
-        f"FAILED CODE:\n{error_code}\n"
-        f"Please provide only the corrected Python code that fixes this specific error. "
-        f"Maintain the same header and footer rules."
+    # LLMClient.chat() takes system + user and returns a plain string
+    # works for both local (ollama) and API mode automatically
+    raw_fix = get_client().chat(
+        system="You are a FreeCAD Python debugger. Return ONLY raw Python code. No explanation, no markdown.",
+        user=(
+            f"The following FreeCAD script failed with an error.\n"
+            f"ERROR: {error_message}\n"
+            f"FAILED CODE:\n{error_code}\n"
+            f"Return ONLY the corrected Python code."
+        ),
     )
 
-    response = ollama.chat(
-        model="qwen2.5-coder:7b",
-        messages=[
-            {"role": "system", "content": "You are a FreeCAD Python debugger. Return ONLY raw code."},
-            {"role": "user",   "content": fixing_prompt},
-        ],
-    )
-
-    raw_fix   = response.message.content
+    # Strip any markdown the model may have added
     clean_fix = raw_fix.replace("```python", "").replace("```", "").strip()
     return clean_fix
