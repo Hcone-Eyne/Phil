@@ -8,7 +8,8 @@ import json
 import os
 import re
 
-import ollama  # type: ignore
+import ollama  # type: ignore  — kept for local fallback detection only
+from setup.llm_client import get_client  # unified LLM backend (local + API)
 from dotenv import load_dotenv  # type: ignore
 
 from voice_input import stage_manager
@@ -814,15 +815,14 @@ def translator(user_request):
     # Keep the raw response so we can log it if validation fails
     raw = ""
     try:
-        response = ollama.chat(
-            model="qwen2.5-coder:7b",
-            messages=[
-                # Use the enriched system prompt that includes past mistakes
-                {"role": "system", "content": system_prompt_with_memory},
-                {"role": "user", "content": user_prompt},
-            ],
+        # LLMClient.chat() returns a plain string
+        # format_json=True enables constrained decoding in local mode —
+        # forces valid JSON at token level, model cannot output thoughts/steps
+        raw = get_client().chat(
+            system=system_prompt_with_memory,
+            user=user_prompt,
+            format_json=True,   # permanent fix for JSON format failures
         )
-        raw = response.message.content
         print("\n[Builder Model]: JSON received.")
         spec = extract_json(raw)
     except json.JSONDecodeError as exc:
