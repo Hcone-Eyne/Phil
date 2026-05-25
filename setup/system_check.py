@@ -81,7 +81,7 @@ def check_ollama() -> CheckStatus:
     if not executable:
         return CheckStatus(
             ok=False,
-            detail="Ollama is not installed.",
+            detail="Ollama required.",
             value={"path": None, "server_running": False, "models": []},
         )
 
@@ -89,7 +89,7 @@ def check_ollama() -> CheckStatus:
     if error:
         return CheckStatus(
             ok=True,
-            detail=f"Ollama is installed, but the local server is not reachable: {error}",
+            detail=f"Ollama is installed but not running — open Ollama.app first. {error}",
             value={"path": executable, "server_running": False, "models": models},
         )
 

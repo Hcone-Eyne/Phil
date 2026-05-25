@@ -359,8 +359,9 @@ class Phil_Overlay(ctk.CTk):
                     self.after(0, lambda: self._finish_failure("Command failed"))
  
             except Exception as e:
-                print(f"[Phil] Error: {e}")
-                self.after(0, lambda: self._finish_failure(str(e)))
+                error_message = str(e)
+                print(f"[Phil] Error: {error_message}")
+                self.after(0, lambda msg=error_message: self._finish_failure(msg))
  
     def _finish_success(self, thumb, user_input):
         self._stop_loading(success=True)

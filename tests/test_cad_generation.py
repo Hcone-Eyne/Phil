@@ -1,6 +1,9 @@
 import ast
+from pathlib import Path
+import tempfile
 import unittest
 
+from voice_input.cad_assist import ai_core
 from voice_input.cad_assist.ai_core import _offline_spec
 from voice_input.cad_assist.builder import json_to_freecad
 
@@ -50,6 +53,42 @@ class CadGenerationTests(unittest.TestCase):
         code = self._code_for("make a shaft diameter 8 length 40 with keyway")
         self.assertIn("shaft = Part.makeCylinder(4.0, 40.0)", code)
         self.assertIn("_shaft_keyway", code)
+
+    def test_servo_mount_with_shaft_holes_is_not_a_shaft(self):
+        code = self._code_for(
+            "make a robot servo mount with a hollow rectangular body and two shaft holes"
+        )
+        self.assertIn("outer_body = Part.makeBox", code)
+        self.assertIn("inner_cavity = Part.makeBox", code)
+        self.assertIn("shaft_hole_1 = Part.makeCylinder", code)
+        self.assertIn("shaft_hole_2 = Part.makeCylinder", code)
+        self.assertIn("final_shape = outer_body.cut(inner_cavity).cut(shaft_hole_1).cut(shaft_hole_2)", code)
+        self.assertNotIn("shaft = Part.makeCylinder", code)
+
+    def test_generated_asset_library_is_added_to_prompt(self):
+        original_path = ai_core._GENERATED_ASSET_LIBRARY_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                ai_core._GENERATED_ASSET_LIBRARY_PATH = Path(tmpdir) / "assets.json"
+                spec = {
+                    "description": "Make a motor housing with a shaft hole.",
+                    "parts": [
+                        {"type": "cylinder", "name": "housing_body", "r": 15, "h": 50},
+                        {"type": "cylinder", "name": "shaft_hole", "r": 5, "h": 50.2},
+                    ],
+                    "operations": [
+                        {"type": "cut", "base": "housing_body", "cutters": ["shaft_hole"]}
+                    ],
+                }
+                ai_core._register_generated_asset(
+                    "make a motor housing 50mm long 30mm diameter with a 10mm shaft hole",
+                    spec,
+                )
+                prompt = ai_core._build_asset_library_prompt()
+                self.assertIn("asset:motor_housing_shaft_hole", prompt)
+                self.assertIn("Make a motor housing with a shaft hole.", prompt)
+        finally:
+            ai_core._GENERATED_ASSET_LIBRARY_PATH = original_path
 
 
 if __name__ == "__main__":
