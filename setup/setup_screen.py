@@ -241,14 +241,7 @@ class SetupScreen(ctk.CTk):
         
         ctk.CTkLabel(card, text="🖥  Local Mode", font=("Inter", 15, "bold"), text_color=text_col).pack(pady=(20, 6))
         
-        desc = (
-            f"Runs entirely on device.\nNo API key needed.\n\n"
-            f"Recommended model:\n{self._recommended_model}\n\n"
-            f"RAM detected: {self._ram_gb:.1f} GB"
-        ) if viable else (
-            f"Requires 8 GB RAM minimum.\nYour device has {self._ram_gb:.1f} GB.\n\n"
-            f"Please use API cloud mode."
-        )
+        desc = self._local_card_description(viable)
         
         ctk.CTkLabel(card, text=desc, font=("Inter", 11), text_color=text_col, justify="center").pack(pady=8, padx=12)
         
@@ -258,6 +251,25 @@ class SetupScreen(ctk.CTk):
             state="normal" if viable else "disabled", command=self._handle_local_selection
         )
         self._local_btn.pack(side="bottom", pady=20)
+
+    def _local_card_description(self, viable: bool) -> str:
+        if not viable:
+            return (
+                f"Requires 8 GB RAM minimum.\nYour device has {self._ram_gb:.1f} GB.\n\n"
+                f"Please use API cloud mode."
+            )
+
+        ollama_status = "Ollama required"
+        if self._ollama_installed and self._ollama_server_running:
+            ollama_status = f"Ollama running\nModels found: {len(self._installed_models)}"
+        elif self._ollama_installed:
+            ollama_status = "Ollama installed but not running"
+
+        return (
+            f"Runs entirely on device.\nNo API key needed.\n\n"
+            f"Recommended model:\n{self._recommended_model}\n\n"
+            f"{ollama_status}"
+        )
 
     def _build_api_card(self, parent):
         card = ctk.CTkFrame(parent, fg_color=_T.surface2, border_color=_T.border, border_width=1, corner_radius=10)
@@ -293,7 +305,7 @@ class SetupScreen(ctk.CTk):
         ctk.CTkLabel(center, text="Start Ollama", font=("Inter", 20, "bold"), text_color=_T.text).pack(pady=(0, 8))
         ctk.CTkLabel(
             center,
-            text="Ollama is installed, but Phil cannot reach its local server.\nOpen the Ollama app or run `ollama serve`, then retry.",
+            text="Ollama is installed but not running — open Ollama.app first.",
             font=("Inter", 12),
             text_color=_T.dim,
             justify="center",
@@ -329,8 +341,10 @@ class SetupScreen(ctk.CTk):
             self._installed_models = value.get("models", [])
         if self._ollama_installed and self._ollama_server_running:
             self._show_local_model_screen()
-        else:
+        elif self._ollama_installed:
             self._show_ollama_server_screen()
+        else:
+            self._show_ollama_install_screen()
 
     def _show_local_model_screen(self):
         self._clear()

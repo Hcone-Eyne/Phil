@@ -8,10 +8,13 @@ import json
 import os
 import re
 
-import ollama  # type: ignore  — kept for local fallback detection only
-from setup.llm_client import get_client  # unified LLM backend (local + API)
-from dotenv import load_dotenv  # type: ignore
+try:
+    from dotenv import load_dotenv  # type: ignore
+except ModuleNotFoundError:
+    def load_dotenv(*args, **kwargs):
+        return False
 
+from setup.llm_client import get_client
 from voice_input import stage_manager
 from voice_input.Keys.config import ai_gen_folder
 from voice_input.cad_assist.builder import build_and_save
@@ -37,6 +40,11 @@ _ERROR_MEMORY_PATH = Path("/Users/enoch/Desktop/Free_Cad_Extension/voice_input/l
 # How many past errors to inject per prompt
 # 5 is the sweet spot — enough to cover patterns, not enough to confuse 7B
 _MAX_ERRORS_TO_INJECT = 5
+
+_GENERATED_ASSET_LIBRARY_PATH = Path(
+    "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/cad_assist/generated_asset_library.json"
+)
+_MAX_GENERATED_ASSETS = 20
 
 
 def _load_error_memory() -> list:
@@ -128,6 +136,135 @@ def _build_error_memory_prompt() -> str:
     lines.append("=== END OF PAST MISTAKES ===\n")
 
     return "\n".join(lines)
+
+
+def _load_generated_asset_library() -> dict:
+    if not _GENERATED_ASSET_LIBRARY_PATH.exists():
+        return {}
+    try:
+        with open(_GENERATED_ASSET_LIBRARY_PATH, "r") as file:
+            data = json.load(file)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_generated_asset_library(assets: dict):
+    _GENERATED_ASSET_LIBRARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_GENERATED_ASSET_LIBRARY_PATH, "w") as file:
+        json.dump(assets, file, indent=2)
+
+
+def _asset_key_from_request(user_request: str) -> str:
+    text = user_request.lower()
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mm|millimeter|millimeters|cm|inch|inches)?\b", " ", text)
+    words = re.findall(r"[a-z][a-z0-9_]*", text)
+    stop_words = {
+        "a", "an", "and", "the", "with", "without", "make", "create", "build",
+        "generate", "simple", "model", "part", "mm", "long", "wide", "tall",
+        "diameter", "thick", "thickness", "through", "center", "centre",
+    }
+    useful = []
+    for word in words:
+        if word not in stop_words and word not in useful:
+            useful.append(word)
+    key = "_".join(useful[:5]) or "generated_asset"
+    return re.sub(r"[^a-z0-9_]+", "_", key).strip("_")
+
+
+def _clone_json(data):
+    return json.loads(json.dumps(data))
+
+
+def _asset_library() -> dict:
+    assets = {}
+    for name, spec in SHAPE_PATTERNS.items():
+        assets[name] = {
+            "source": "built_in",
+            "description": spec.get("description", f"Reusable CAD asset: {name}."),
+            "spec": spec,
+        }
+    assets.update(_load_generated_asset_library())
+    return assets
+
+
+def _compact_spec_for_prompt(spec: dict) -> dict:
+    compact = {
+        "parts": spec.get("parts", [])[:6],
+        "operations": spec.get("operations", [])[:4],
+    }
+    return compact
+
+
+def _build_asset_library_prompt() -> str:
+    assets = _asset_library()
+    if not assets:
+        return ""
+
+    lines = [
+        "\n=== CAD ASSET LIBRARY ===",
+        "These assets are examples/tools, not routers. The user's full prompt is the source of truth.",
+        "Use an asset only when it genuinely helps. If no asset fits, generate the model from primitives.",
+        "If an asset word appears as a feature, do not turn the whole model into that asset.",
+        "Example: 'shaft hole' means a cylinder cutter unless the user asks for a shaft itself.",
+        'You may reference a single-part asset as {"type": "asset:name", "name": "my_part"}.',
+        "For multi-part assets, copy/adapt the shown parts into your JSON instead of referencing blindly.",
+        "",
+        "Available assets:",
+    ]
+
+    for name, entry in sorted(assets.items()):
+        description = entry.get("description", "").replace("\n", " ").strip()
+        source = entry.get("source", "built_in")
+        spec = entry.get("spec", {})
+        parts = spec.get("parts", [])
+        single_part = "single-part" if len(parts) == 1 else f"{len(parts)} parts"
+        lines.append(f"- asset:{name} ({source}, {single_part}): {description[:180]}")
+        if source == "generated":
+            snippet = json.dumps(_compact_spec_for_prompt(spec), separators=(",", ":"))
+            lines.append(f"  JSON snippet: {snippet[:900]}")
+
+    lines.append("=== END CAD ASSET LIBRARY ===\n")
+    return "\n".join(lines)
+
+
+def _uses_asset_reference(spec: dict) -> bool:
+    for part in spec.get("parts", []):
+        ptype = part.get("type", "")
+        if isinstance(ptype, str) and (ptype.startswith("asset:") or ptype.startswith("pattern:")):
+            return True
+    return False
+
+
+def _register_generated_asset(user_request: str, spec: dict):
+    if not validate_json_spec(spec) or _uses_asset_reference(spec):
+        return
+
+    assets = _load_generated_asset_library()
+    base_key = _asset_key_from_request(user_request)
+    key = base_key
+    suffix = 2
+    while key in SHAPE_PATTERNS or key in assets:
+        existing = assets.get(key, {})
+        if existing.get("request") == user_request:
+            break
+        key = f"{base_key}_{suffix}"
+        suffix += 1
+
+    assets[key] = {
+        "source": "generated",
+        "created_at": datetime.now().isoformat(),
+        "request": user_request,
+        "description": spec.get("description", user_request),
+        "spec": _clone_json(spec),
+    }
+
+    if len(assets) > _MAX_GENERATED_ASSETS:
+        ordered = sorted(assets.items(), key=lambda item: item[1].get("created_at", ""))
+        assets = dict(ordered[-_MAX_GENERATED_ASSETS:])
+
+    _save_generated_asset_library(assets)
+    print(f"[AssetLibrary] Registered generated asset: asset:{key}")
 
 
 
@@ -451,6 +588,34 @@ sg90_servo_arm -> length, width, thickness, hub_diameter, shaft_bore_diameter, s
 - fuse combines solid parts; cut removes material; assign = single part output
 - Output ONLY the raw JSON object — no markdown, no backticks, no comments
 
+=== READY-MADE PARTS (optional — use when helpful) ===
+These are pre-built high-quality parts. You may use them directly, combine
+multiple together, or modify them by overriding dimensions. Use type="asset:name"
+to reference a single-part asset. Or ignore them entirely and build from primitives.
+
+Available ready-made parts:
+- asset:bolt          → hex bolt (hex head + cylindrical shaft)
+- asset:pipe          → hollow tube (outer cylinder + inner cutout)
+- asset:plate         → rectangular plate with corner mounting holes
+- asset:shaft         → cylindrical rod with optional flat keyway
+- asset:l_bracket     → L-shaped mounting bracket with holes through both faces
+- asset:flange        → circular disc with center bore + bolt circle holes
+- asset:spur_gear     → involute spur gear with configurable teeth + bore
+- asset:sg90_servo_arm → SG90 servo horn with 21-spline shaft bore
+- asset:lego_brick    → Lego brick with hollow bottom + cylindrical studs
+- asset:aeroplane     → simple fuselage + wings + tail fin
+
+COMPOSING EXAMPLE — servo mount using two ready-made parts:
+Request: "servo mount with bracket body and shaft holes"
+{
+  "parts": [
+    {"type": "asset:l_bracket", "name": "mount_body", "length": 40, "width": 25, "height": 35, "thickness": 3},
+    {"type": "cylinder", "name": "shaft_hole_1", "r": 4, "h": 35.2, "translate": [10, 12, -0.1]},
+    {"type": "cylinder", "name": "shaft_hole_2", "r": 4, "h": 35.2, "translate": [30, 12, -0.1]}
+  ],
+  "operations": [{"type": "cut", "base": "mount_body", "cutters": ["shaft_hole_1", "shaft_hole_2"]}]
+}
+
 === EXAMPLES ===
 
 --- Example 1: hollow cup (teaches: outer body + hollow interior via cut) ---
@@ -529,6 +694,42 @@ def extract_json(raw: str) -> dict:
     return json.loads(clean[start:end])
 
 
+def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, error: Exception) -> dict | None:
+    repair_prompt = (
+        "Your previous response could not be used as a FreeCAD JSON spec.\n"
+        f"Original build request: {user_request}\n\n"
+        f"Parser/validation error: {error}\n\n"
+        f"Bad response:\n{bad_output[:2000]}\n\n"
+        "Return ONLY one corrected raw JSON object with 'parts' and 'operations'."
+    )
+    try:
+        repaired_raw = get_client().chat(
+            system=system_prompt,
+            user=repair_prompt,
+            format_json=True,
+        )
+        repaired = extract_json(repaired_raw)
+        if validate_json_spec(repaired):
+            print("[AI Core] LLM JSON repaired successfully.")
+            return repaired
+    except Exception as repair_exc:
+        print(f"[AI Core] LLM repair failed: {repair_exc}")
+    return None
+
+
+def _offline_fallback_enabled() -> bool:
+    value = os.getenv("PHIL_ALLOW_OFFLINE_FALLBACK", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _offline_or_none(user_request: str, reason: str) -> dict | None:
+    if _offline_fallback_enabled():
+        print(f"[AI Core] {reason} — using explicit offline fallback")
+        return _offline_spec(user_request)
+    print(f"[AI Core] {reason} — offline fallback disabled")
+    return None
+
+
 def _save_json_spec(spec: dict, user_request: str):
     json_path = ai_gen_folder / "last_spec.json"
     with open(json_path, "w") as file:
@@ -562,8 +763,93 @@ def _first_number_near(
     return default
 
 
+def _count_from_words(text: str, default: int = 2) -> int:
+    word_counts = {
+        "one": 1,
+        "single": 1,
+        "two": 2,
+        "dual": 2,
+        "three": 3,
+        "four": 4,
+    }
+    for word, count in word_counts.items():
+        if re.search(rf"\b{word}\b", text):
+            return count
+    match = re.search(r"\b(\d+)\s+(?:shaft\s+)?holes?\b", text)
+    if match:
+        return int(match.group(1))
+    return default
+
+
+def _servo_mount_spec(user_request: str) -> dict:
+    req = user_request.lower()
+    nums = _numbers(req)
+
+    length = nums[0] if len(nums) > 0 else 50
+    width = nums[1] if len(nums) > 1 else 28
+    height = nums[2] if len(nums) > 2 else 24
+    wall = _first_number_near(req, ("wall", "walls", "thick", "thickness"), 3)
+    shaft_diameter = _first_number_near(req, ("shaft", "hole", "holes", "bore"), 8)
+    hole_count = _count_from_words(req, default=2)
+
+    inner_length = max(length - (2 * wall), 1)
+    inner_width = max(width - (2 * wall), 1)
+    inner_height = max(height - wall, 1)
+    hole_spacing = min(length / (hole_count + 1), 18)
+
+    parts = [
+        {"type": "box", "name": "outer_body", "l": length, "w": width, "h": height},
+        {
+            "type": "box",
+            "name": "inner_cavity",
+            "l": inner_length,
+            "w": inner_width,
+            "h": inner_height + 0.2,
+            "translate": [wall, wall, wall],
+        },
+    ]
+
+    start_x = (length - (hole_spacing * (hole_count - 1))) / 2
+    for index in range(hole_count):
+        x = start_x + index * hole_spacing
+        parts.append(
+            {
+                "type": "cylinder",
+                "name": f"shaft_hole_{index + 1}",
+                "r": shaft_diameter / 2,
+                "h": width + 0.4,
+                "rotate": {"axis": [1, 0, 0], "angle": 90},
+                "translate": [x, width + 0.2, height / 2],
+            }
+        )
+
+    return {
+        "description": (
+            f"Make a hollow rectangular robot servo mount body "
+            f"{length:g} x {width:g} x {height:g} mm with {hole_count} "
+            f"{shaft_diameter:g} mm shaft holes."
+        ),
+        "parts": parts,
+        "operations": [
+            {
+                "type": "cut",
+                "base": "outer_body",
+                "cutters": ["inner_cavity"]
+                + [f"shaft_hole_{index + 1}" for index in range(hole_count)],
+            }
+        ],
+    }
+
+
 def _offline_spec(user_request: str) -> dict:
     req = user_request.lower()
+
+    if (
+        "mount" in req
+        and any(token in req for token in ("servo", "robot", "motor"))
+        and any(token in req for token in ("hollow", "rectangular", "body", "shaft hole", "shaft holes"))
+    ):
+        return _servo_mount_spec(user_request)
 
     if any(token in req for token in ("sg90", "servo arm", "servo horn")) and "gear" not in req:
         return SHAPE_PATTERNS["sg90_servo_arm"]
@@ -678,7 +964,12 @@ def _offline_spec(user_request: str) -> dict:
             "operations": [{"type": "assign", "part": "mounting_plate"}],
         }
 
-    if any(token in req for token in ("shaft", "axle")):
+    if (
+        any(token in req for token in ("shaft", "axle"))
+        and "shaft hole" not in req
+        and "shaft holes" not in req
+        and _is_main_intent(req, ("shaft", "axle"))
+    ):
         diameter = _first_number_near(req, ("diameter", "dia"), 8, allow_before=False)
         length = _first_number_near(req, ("long", "length"), 40, allow_before=False)
         return {
@@ -758,103 +1049,92 @@ def _is_main_intent(req: str, tokens: tuple) -> bool:
 
 
 def translator(user_request):
+    """
+    LLM-as-router architecture.
+
+    The LLM sees the full request AND the available ready-made parts.
+    It decides whether to:
+      - Build from scratch using primitives
+      - Use a ready-made part directly (type = "l_bracket", "flange", etc.)
+      - Combine multiple ready-made parts
+      - Use a ready-made part as a base and modify it
+
+    No keyword matching. No bypassing the LLM.
+    The LLM is the brain — patterns are optional tools it can reach for.
+
+    Fallback: _offline_spec() only fires if LLM fails completely.
+    """
     previous_memory = stage_manager.get_memory()
-    req = user_request.lower()
 
-    offline_first_tokens = (
-        "gear",
-        "flange",
-        "bracket",
-        "shaft",
-        "axle",
-        "servo arm",
-        "servo horn",
-        "lego",
-        "brick",
-    )
-
-    # Only bypass LLM if the request is PRIMARILY about one of these shapes
-    # e.g. "make a shaft" → yes. "mount with shaft holes" → no, send to LLM
-    if _is_main_intent(req, offline_first_tokens):
-        print("[AI Core] Mechanical task - using deterministic builder")
-        spec = _offline_spec(user_request)
-        try:
-            filename = build_and_save(spec)
-            _save_json_spec(spec, user_request)
-            return filename
-        except Exception as exc:
-            print(f"[AI Core] Deterministic build failed: {exc}, falling back to LLM")
-
-    pattern = get_pattern_json(user_request)
-    if pattern:
-        print("[AI Core] Known shape - using pattern directly")
-        try:
-            filename = build_and_save(pattern)
-            _save_json_spec(pattern, user_request)
-            return filename
-        except Exception as exc:
-            print(f"[AI Core] Pattern build failed: {exc}, falling back to LLM")
+    error_memory_block = _build_error_memory_prompt()
+    asset_library_block = _build_asset_library_prompt()
+    system_prompt_with_memory = JSON_SYSTEM_RULE + asset_library_block + error_memory_block
 
     user_prompt = (
         f"Previous build context:\n{previous_memory}\n\n"
         f"Build request: {user_request}"
     )
 
-    # ── Inject error memory into system prompt ────────────────────────────────
-    # Read the model's past mistakes and append them to the system rules.
-    # On first run this returns "" so nothing changes.
-    # After any failure, the model will see what it did wrong last time.
-    error_memory_block = _build_error_memory_prompt()
-    system_prompt_with_memory = JSON_SYSTEM_RULE + error_memory_block
-
     print("Builder Model Active...")
-    print("[Qwen 2.5]: Generating JSON spec...")
     if error_memory_block:
         print(f"[ErrorMemory] Injecting {min(_MAX_ERRORS_TO_INJECT, len(_load_error_memory()))} past mistakes into prompt")
 
-    # Keep the raw response so we can log it if validation fails
     raw = ""
     try:
-        # LLMClient.chat() returns a plain string
-        # format_json=True enables constrained decoding in local mode —
-        # forces valid JSON at token level, model cannot output thoughts/steps
+        # format_json=True = constrained decoding in local mode
+        # In API mode it's ignored — API models reliably return JSON from the prompt alone
         raw = get_client().chat(
             system=system_prompt_with_memory,
             user=user_prompt,
-            format_json=True,   # permanent fix for JSON format failures
+            format_json=True,
         )
         print("\n[Builder Model]: JSON received.")
         spec = extract_json(raw)
-    except json.JSONDecodeError as exc:
-        # Model returned something but it wasn't valid JSON at all
-        # Log this so next time the model knows its JSON was unparseable
+
+    except (json.JSONDecodeError, ValueError) as exc:
         log_format_error(
             bad_output=raw,
             error_type="invalid_json",
-            lesson="Your response was not valid JSON. Return ONLY a raw JSON object starting with { and ending with }. No markdown, no backticks, no explanation.",
+            lesson=(
+                "Your response was not valid JSON. "
+                "Return ONLY a raw JSON object starting with { and ending with }. "
+                "No markdown, no backticks, no explanation."
+            ),
         )
-        print(f"[AI Core] JSON parse failed: {exc} — using offline fallback")
-        spec = _offline_spec(user_request)
+        print(f"[AI Core] JSON parse failed: {exc} — trying LLM repair")
+        spec = _repair_llm_json(system_prompt_with_memory, user_request, raw, exc)
+        if spec is None:
+            spec = _offline_or_none(user_request, "LLM JSON parse failed after repair")
+
     except Exception as exc:
-        print(f"[AI Core] LLM path failed: {exc}")
-        print("[AI Core] Using offline mechanical fallback.")
-        spec = _offline_spec(user_request)
+        print(f"[AI Core] LLM failed: {exc}")
+        spec = _offline_or_none(user_request, "LLM request failed")
+
+    if spec is None:
+        return None
 
     if not validate_json_spec(spec):
-        # Model returned valid JSON but wrong structure (e.g. thoughts/steps/code_changes)
-        # Log the specific keys it used so the lesson is concrete and recognisable
         bad_keys = list(spec.keys()) if isinstance(spec, dict) else []
         log_format_error(
             bad_output=raw,
             error_type="wrong_format",
             lesson=(
-                f"You returned a JSON object with keys {bad_keys} instead of the required "
-                f"'parts' and 'operations' keys. ONLY return {{\"parts\": [...], \"operations\": [...]}}. "
-                f"No 'thoughts', no 'steps', no 'code_changes', no 'description' at root level."
+                f"You returned keys {bad_keys} instead of 'parts' and 'operations'. "
+                'Return ONLY {"parts": [...], "operations": [...]}.'
             ),
         )
-        print("[AI Core] JSON spec invalid — logged to error memory")
+        print("[AI Core] Invalid spec — trying LLM repair")
+        repaired = _repair_llm_json(system_prompt_with_memory, user_request, raw, ValueError("wrong JSON shape"))
+        if repaired is not None:
+            spec = repaired
+        else:
+            spec = _offline_or_none(user_request, "LLM returned invalid spec after repair")
+
+    if spec is None:
         return None
+
+    used_asset_reference = _uses_asset_reference(spec)
+    spec = _expand_asset_references(spec)
 
     _save_json_spec(spec, user_request)
 
@@ -864,5 +1144,57 @@ def translator(user_request):
         print(f"[AI Core] Builder failed: {exc}")
         return None
 
-    print("Qwen 2.5 successfully ran (JSON pipeline)")
+    if not used_asset_reference:
+        _register_generated_asset(user_request, spec)
+
+    print("[AI Core] Build complete.")
     return filename
+
+
+def _expand_asset_references(spec: dict) -> dict:
+    """
+    If the LLM used type="asset:name" to reference a ready-made part,
+    expand it into the full part spec, letting the LLM override dimensions.
+
+    Example:
+        LLM returns: {"type": "asset:flange", "name": "output_flange", "outer_diameter": 50}
+        Builder gets: full flange spec with outer_diameter overridden to 50
+
+    This lets the LLM compose and customise patterns without knowing
+    every internal parameter — it just says which pattern and what to change.
+    """
+    if "parts" not in spec:
+        return spec
+
+    parts = spec.get("parts", [])
+    if len(parts) == 1:
+        only_part = parts[0]
+        ptype = only_part.get("type", "")
+        if isinstance(ptype, str) and (ptype.startswith("asset:") or ptype.startswith("pattern:")):
+            asset_name = ptype.split(":", 1)[1]
+            asset = _asset_library().get(asset_name, {})
+            asset_spec = asset.get("spec")
+            if asset_spec and len(asset_spec.get("parts", [])) > 1:
+                print(f"[AI Core] Expanded full asset: {asset_name}")
+                return _clone_json(asset_spec)
+
+    expanded = []
+    for part in parts:
+        ptype = part.get("type", "")
+        if ptype.startswith("asset:") or ptype.startswith("pattern:"):
+            pattern_name = ptype.split(":", 1)[1]
+            asset = _asset_library().get(pattern_name, {})
+            pattern = asset.get("spec")
+            if pattern and pattern.get("parts"):
+                # Use first part of pattern as base, override with LLM's values
+                base = dict(pattern["parts"][0])
+                base.update({k: v for k, v in part.items() if k != "type"})
+                expanded.append(base)
+                print(f"[AI Core] Expanded asset: {pattern_name}")
+            else:
+                expanded.append(part)
+        else:
+            expanded.append(part)
+
+    spec["parts"] = expanded
+    return spec
