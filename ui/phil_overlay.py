@@ -212,20 +212,22 @@ class Phil_Overlay(ctk.CTk):
         ).start()
 
     def _run_command(self, user_input: str):
+        def status(msg: str):
+            self.after(0, lambda m=msg: self.phil.update_thinking_label(m))
+
         with self.processing_lock:
             try:
                 from voice_input.command_bridge import process_command
-                success = process_command(user_input)
+                success = process_command(user_input, status_callback=status)
 
                 if success:
+                    status("Done ✓")
                     from ui.thumbnail import generate_snippet
                     thumb = generate_snippet()
                     self.after(0, lambda: self._show_preview(thumb, user_input))
                 else:
                     self.after(0, lambda: self._show_error("Command failed"))
-
             except Exception as e:
-                print(f"[Phil] Error: {e}")
                 self.after(0, lambda: self._show_error(str(e)))
 
     def _show_error(self, msg: str = "Error!"):
@@ -299,13 +301,30 @@ class Phil_Overlay(ctk.CTk):
 
     def _export_freecad(self, mode: str = "save"):
         """mode = 'save' | 'import' | 'reveal'"""
-        from ui.exporter import export_to_freecad
-        threading.Thread(target=export_to_freecad, args=(mode,), daemon=True).start()
+        self.phil.show_export_loading(True, f"FreeCAD: {mode.upper()}…")
+        def run():
+            from ui.exporter import export_to_freecad
+            try:
+                export_to_freecad(mode)
+            except Exception as e:
+                print(f"[Export FreeCAD Error] {e}")
+            finally:
+                self.after(0, lambda: self.phil.show_export_loading(False))
+        threading.Thread(target=run, daemon=True, name="ExportFreeCAD").start()
 
     def _export_blender(self, mode: str = "save"):
         """mode = 'save' | 'import' | 'reveal'"""
-        from ui.exporter import export_to_blender
-        threading.Thread(target=export_to_blender, args=(mode,), daemon=True).start()
+        action_text = "CONVERTING STEP TO OBJ…" if mode in ("save", "import", "reveal") else f"{mode.upper()}…"
+        self.phil.show_export_loading(True, f"Blender: {action_text}")
+        def run():
+            from ui.exporter import export_to_blender
+            try:
+                export_to_blender(mode)
+            except Exception as e:
+                print(f"[Export Blender Error] {e}")
+            finally:
+                self.after(0, lambda: self.phil.show_export_loading(False))
+        threading.Thread(target=run, daemon=True, name="ExportBlender").start()
 
     def _back_to_idle(self):
         self.phil.show_idle_state()

@@ -1,0 +1,22 @@
+{
+  "request": "Write a FreeCAD Python script that creates a flat box named wall_back.\nDimensions: length=6, width=0.15, height=3.\nPosition at X=0, Y=4.85, Z=0. Translate to Y=4.85 only, X and Z stay at 0.\nExport as model.step.",
+  "description": "Make a simple 6 x 0.15 x 3 mm solid block.",
+  "spec": {
+    "description": "Make a simple 6 x 0.15 x 3 mm solid block.",
+    "parts": [
+      {
+        "type": "box",
+        "name": "block",
+        "l": 6.0,
+        "w": 0.15,
+        "h": 3.0
+      }
+    ],
+    "operations": [
+      {
+        "type": "assign",
+        "part": "block"
+      }
+    ]
+  }
+}

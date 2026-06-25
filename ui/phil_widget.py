@@ -71,9 +71,11 @@ AUTO-RESIZE:
 """
 
 # pyrefly: ignore [missing-import]
-import customtkinter as ctk 
+import customtkinter as ctk
 # pyrefly: ignore [missing-import]
-from PIL import Image # type: ignore    
+from PIL import Image  # type: ignore
+
+from ui.animations import PulseRing
 
 
 # ── Design tokens ─────────────────────────────────────────────────────────────
@@ -116,8 +118,9 @@ class Visual_look_Phill(ctk.CTkFrame):
             **kwargs
         )
         self._master = master
-        # Track current active state name for auto-resize hints
         self._current_state = "idle"
+        self._pulse_ring: PulseRing | None = None
+        self._thinking_label: ctk.CTkLabel | None = None
         self._build_idle_state()
 
     # ══════════════════════════════════════════════════════════════════
@@ -223,19 +226,69 @@ class Visual_look_Phill(ctk.CTkFrame):
     # ══════════════════════════════════════════════════════════════════
 
     def show_thinking_state(self, message: str = "Thinking…"):
-        """Minimal state shown while the AI command runs."""
         self._clear()
         self._current_state = "thinking"
-
-        ctk.CTkLabel(
-            self, text="⏳  " + message,
+        self._pulse_ring = PulseRing(
+            self, color=phil_theme.thinking, bg_color=phil_theme.pill_bg,
+        )
+        self._pulse_ring.pack(pady=(10, 4))
+        self._pulse_ring.start()
+        self._thinking_label = ctk.CTkLabel(
+            self, text=message,
             text_color=phil_theme.thinking,
             font=("Inter", 12, "bold"),
             fg_color="transparent",
-        ).pack(pady=20, padx=16)
+        )
+        self._thinking_label.pack(pady=(2, 4), padx=16)
+
+        # Sleek glowing horizontal progress bar
+        self._thinking_progress = ctk.CTkProgressBar(
+            self,
+            width=280,
+            height=4,
+            corner_radius=2,
+            fg_color=phil_theme.surface,
+            progress_color=phil_theme.thinking,
+        )
+        self._thinking_progress.pack(pady=(4, 16), padx=16)
+        self._thinking_progress.configure(mode="indeterminate")
+        self._thinking_progress.start()
 
         self.configure(border_color=phil_theme.thinking)
         self._schedule_resize()
+
+    def update_thinking_label(self, message: str):
+        if self._thinking_label is not None:
+            try:
+                if self._thinking_label.winfo_exists():
+                    self._thinking_label.configure(text=message)
+            except Exception:
+                pass
+        msg = message.lower()
+        if any(k in msg for k in ("fix", "done", "✓", "success")):
+            color, border = phil_theme.safe, phil_theme.safe
+        elif any(k in msg for k in ("fail", "error", "could not")):
+            color, border = phil_theme.danger, phil_theme.danger
+        else:
+            color, border = phil_theme.thinking, phil_theme.thinking
+        if self._thinking_label is not None:
+            try:
+                if self._thinking_label.winfo_exists():
+                    self._thinking_label.configure(text_color=color)
+            except Exception:
+                pass
+        if self._pulse_ring is not None:
+            try:
+                self._pulse_ring.set_color(color)
+            except Exception:
+                pass
+        if hasattr(self, "_thinking_progress") and self._thinking_progress is not None:
+            try:
+                if self._thinking_progress.winfo_exists():
+                    self._thinking_progress.configure(progress_color=color)
+            except Exception:
+                pass
+        self.configure(border_color=border)
 
     # ══════════════════════════════════════════════════════════════════
     # PREVIEW STATE — thumbnail + prompt + accept/modify
@@ -395,6 +448,7 @@ class Visual_look_Phill(ctk.CTkFrame):
     def show_export_state(self, on_freecad, on_blender, on_back):
         self._clear()
         self._current_state = "export"
+        self._export_buttons = []
 
         # ── header ────────────────────────────────────────────────────
         hdr = ctk.CTkFrame(self, fg_color="transparent")
@@ -452,7 +506,7 @@ class Visual_look_Phill(ctk.CTkFrame):
             btn_row = ctk.CTkFrame(card, fg_color="transparent")
             btn_row.pack(fill="x", padx=10, pady=(0, 8))
 
-            ctk.CTkButton(
+            btn_save = ctk.CTkButton(
                 btn_row, text="💾 Save to…",
                 height=28, corner_radius=phil_theme.radius_btn,
                 fg_color=phil_theme.btn_accept,
@@ -460,9 +514,11 @@ class Visual_look_Phill(ctk.CTkFrame):
                 text_color="#FFFFFF",
                 font=("Inter", 11, "bold"),
                 command=save_cb,
-            ).pack(side="left", padx=(0, 5))
+            )
+            btn_save.pack(side="left", padx=(0, 5))
+            self._export_buttons.append(btn_save)
 
-            ctk.CTkButton(
+            btn_open = ctk.CTkButton(
                 btn_row, text="🚀 Open in App",
                 height=28, corner_radius=phil_theme.radius_btn,
                 fg_color="#1D4ED8",
@@ -470,9 +526,11 @@ class Visual_look_Phill(ctk.CTkFrame):
                 text_color="#FFFFFF",
                 font=("Inter", 11),
                 command=open_cb,
-            ).pack(side="left", padx=(0, 5))
+            )
+            btn_open.pack(side="left", padx=(0, 5))
+            self._export_buttons.append(btn_open)
 
-            ctk.CTkButton(
+            btn_reveal = ctk.CTkButton(
                 btn_row, text="📂 Reveal",
                 height=28, corner_radius=phil_theme.radius_btn,
                 fg_color="transparent",
@@ -481,7 +539,9 @@ class Visual_look_Phill(ctk.CTkFrame):
                 text_color=phil_theme.text_dim,
                 font=("Inter", 11),
                 command=reveal_cb,
-            ).pack(side="left")
+            )
+            btn_reveal.pack(side="left")
+            self._export_buttons.append(btn_reveal)
 
         _card(
             "🟠", "FreeCAD", ".step",
@@ -496,7 +556,7 @@ class Visual_look_Phill(ctk.CTkFrame):
             reveal_cb=lambda: on_blender("reveal"),
         )
 
-        ctk.CTkButton(
+        self.back_btn = ctk.CTkButton(
             self, text="← Back to Idle",
             height=30, corner_radius=phil_theme.radius_btn,
             fg_color="transparent",
@@ -505,7 +565,72 @@ class Visual_look_Phill(ctk.CTkFrame):
             text_color=phil_theme.text_dim,
             font=("Inter", 11),
             command=on_back,
-        ).pack(pady=(0, 14), padx=14, fill="x")
+        )
+        self.back_btn.pack(pady=(0, 14), padx=14, fill="x")
+        self._export_buttons.append(self.back_btn)
+
+        self._schedule_resize()
+
+    def show_export_loading(self, show: bool, message: str = ""):
+        """
+        Shows/hides the export loading bar and status label.
+        Disables/enables export buttons to prevent double actions.
+        """
+        # 1. Update button states
+        state = "disabled" if show else "normal"
+        if hasattr(self, "_export_buttons"):
+            for btn in self._export_buttons:
+                try:
+                    if btn.winfo_exists():
+                        btn.configure(state=state)
+                except Exception:
+                    pass
+
+        # 2. Handle progress bar & status label
+        if show:
+            if not hasattr(self, "_export_loading_frame") or self._export_loading_frame is None or not self._export_loading_frame.winfo_exists():
+                self._export_loading_frame = ctk.CTkFrame(self, fg_color="transparent")
+                
+                # Temporarily unpack back_btn so loading bar goes above it
+                if hasattr(self, "back_btn") and self.back_btn.winfo_exists():
+                    self.back_btn.pack_forget()
+
+                self._export_loading_frame.pack(pady=(4, 10), padx=14, fill="x")
+
+                self._export_status_lbl = ctk.CTkLabel(
+                    self._export_loading_frame,
+                    text=message,
+                    text_color=phil_theme.text_accent,
+                    font=("Inter", 11, "bold"),
+                    fg_color="transparent",
+                )
+                self._export_status_lbl.pack(anchor="w", padx=2, pady=(0, 4))
+
+                self._export_progress = ctk.CTkProgressBar(
+                    self._export_loading_frame,
+                    height=6,
+                    corner_radius=3,
+                    fg_color=phil_theme.pill_bg,
+                    progress_color=phil_theme.btn_voice,
+                )
+                self._export_progress.pack(fill="x")
+                self._export_progress.configure(mode="indeterminate")
+                self._export_progress.start()
+
+                # Repack back_btn
+                if hasattr(self, "back_btn") and self.back_btn.winfo_exists():
+                    self.back_btn.pack(pady=(0, 14), padx=14, fill="x")
+            else:
+                if hasattr(self, "_export_status_lbl") and self._export_status_lbl.winfo_exists():
+                    self._export_status_lbl.configure(text=message)
+        else:
+            if hasattr(self, "_export_loading_frame") and self._export_loading_frame is not None:
+                try:
+                    if self._export_loading_frame.winfo_exists():
+                        self._export_loading_frame.destroy()
+                except Exception:
+                    pass
+            self._export_loading_frame = None
 
         self._schedule_resize()
 
@@ -655,17 +780,15 @@ class Visual_look_Phill(ctk.CTkFrame):
     def _read_current_mode(self) -> tuple:
         try:
             import json
-            from pathlib import Path
-            root = Path(__file__).resolve().parent.parent
-            for p in [root / "phil_config.json",
-                      root / "voice_input" / "Keys" / "phil_config.json"]:
-                if p.exists():
-                    data = json.loads(p.read_text())
-                    mode = data.get("mode", "unknown")
-                    if mode == "local":
-                        return "🖥  Local Mode", data.get("local_model", "unknown model")
-                    elif mode == "api":
-                        return "☁️  API Mode", data.get("provider", "unknown").capitalize()
+            from voice_input.Keys.config import phil_config_path
+            p = phil_config_path
+            if p.exists():
+                data = json.loads(p.read_text())
+                mode = data.get("mode", "unknown")
+                if mode == "local":
+                    return "🖥  Local Mode", data.get("local_model", "unknown model")
+                elif mode == "api":
+                    return "☁️  API Mode", data.get("provider", "unknown").capitalize()
         except Exception:
             pass
         return "Unknown", "Run setup to configure"
@@ -748,7 +871,13 @@ class Visual_look_Phill(ctk.CTkFrame):
         _fade_out(0)
 
     def _clear(self):
-        """Destroy all child widgets. Invalidates references like status_label."""
+        if self._pulse_ring is not None:
+            try:
+                self._pulse_ring.stop()
+            except Exception:
+                pass
+        self._pulse_ring = None
+        self._thinking_label = None
         for w in self.winfo_children():
             w.destroy()
 

@@ -26,6 +26,7 @@ logs/
 *.obj
 
 # Runtime JSON (logs/ already covers most; explicit for files outside logs/)
+voice_input/data/
 voice_input/cad_assist/generated_asset_library.json
 
 # ── macOS ─────────────────────────────────────────────────────────────────────

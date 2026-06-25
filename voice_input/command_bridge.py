@@ -37,7 +37,7 @@ def process_command(user_input: str, status_callback=None) -> bool:
         return False
 
     report("Sending to AI…")
-    generated_script = translator(user_input)
+    generated_script = translator(user_input, status_callback=status_callback)
 
     if not generated_script:
         report("AI failed to generate a script.")

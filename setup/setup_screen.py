@@ -19,6 +19,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 import customtkinter as ctk  # type: ignore
+from voice_input.Keys import config as key_config
 
 # ── Setup package imports ─────────────────────────────────────────────────────
 from setup.system_check import check_ram, check_ollama, check_freecad, get_recommended_model
@@ -34,8 +35,8 @@ from setup.installer import (
 # ── Config paths (Absolute Resolution) ────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_CONFIG_PATH = _PROJECT_ROOT / "phil_config.json"
-_ENV_PATH    = _PROJECT_ROOT / ".env"
+_CONFIG_PATH = Path(key_config.phil_config_path)
+_ENV_PATH    = Path(key_config.env_path)
 
 # Models offered in the local download dropdown
 LOCAL_MODEL_OPTIONS = [

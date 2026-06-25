@@ -176,7 +176,12 @@ class LLMClient:
             kwargs["format"] = "json"
 
         try:
-            response = ollama.chat(**kwargs)
+            try:
+                client = ollama.Client(timeout=60.0)
+                response = client.chat(**kwargs)
+            except AttributeError:
+                # Fallback for older versions of ollama package
+                response = ollama.chat(**kwargs)
             return response.message.content
         except Exception as exc:
             raise LLMError(f"Ollama chat failed: {exc}") from exc

@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import webbrowser
+import importlib.util
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,13 @@ API_PROVIDER_PACKAGES: dict[str, str] = {
     "openrouter": "openai",
 }
 
+PACKAGE_IMPORTS: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "google-generativeai": "google.generativeai",
+    "ollama": "ollama",
+}
+
 
 @dataclass(frozen=True)
 class InstallResult:
@@ -54,6 +62,9 @@ def install_setup_requirements(
     progress_callback: ProgressCallback | None = None,
 ) -> InstallResult:
     """Install shared packages from setup/requirements.txt."""
+    if _running_frozen():
+        return InstallResult(ok=True, detail="Shared dependencies are bundled with Phil.")
+
     if not _REQUIREMENTS_FILE.exists():
         return InstallResult(ok=False, detail=f"Missing requirements file: {_REQUIREMENTS_FILE}")
 
@@ -86,6 +97,15 @@ def pip_install_package(
     progress_callback: ProgressCallback | None = None,
 ) -> InstallResult:
     """Install a single pip package into the current interpreter."""
+    if _running_frozen():
+        module_name = PACKAGE_IMPORTS.get(package, package.replace("-", "_"))
+        if importlib.util.find_spec(module_name) is not None:
+            return InstallResult(ok=True, detail=f"{package} is bundled with Phil.")
+        return InstallResult(
+            ok=False,
+            detail=f"{package} is not bundled in this Phil build. Rebuild the app with this dependency included.",
+        )
+
     _progress(progress_callback, f"Installing {package}…")
     command = [sys.executable, "-m", "pip", "install", package]
     ok = _run_streaming_command(command, progress_callback)
@@ -281,6 +301,10 @@ def _progress(progress_callback: ProgressCallback | None, message: str) -> None:
     print(f"[Installer] {message}")
     if progress_callback:
         progress_callback(message)
+
+
+def _running_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
 
 if __name__ == "__main__":

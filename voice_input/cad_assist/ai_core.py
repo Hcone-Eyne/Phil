@@ -695,7 +695,7 @@ def extract_json(raw: str) -> dict:
     return json.loads(clean[start:end])
 
 
-def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, error: Exception) -> dict | None:
+def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, error: Exception, status_callback=None) -> dict | None:
     repair_prompt = (
         "Your previous response could not be used as a FreeCAD JSON spec.\n"
         f"Original build request: {user_request}\n\n"
@@ -711,24 +711,21 @@ def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, err
         )
         repaired = extract_json(repaired_raw)
         if validate_json_spec(repaired):
-            print("[AI Core] LLM JSON repaired successfully.")
+            msg = "[AI Core] LLM JSON repaired successfully."
+            print(msg)
+            if status_callback:
+                status_callback("Spec repaired successfully! ✓")
             return repaired
     except Exception as repair_exc:
         print(f"[AI Core] LLM repair failed: {repair_exc}")
     return None
 
 
-def _offline_fallback_enabled() -> bool:
-    value = os.getenv("PHIL_ALLOW_OFFLINE_FALLBACK", "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 def _offline_or_none(user_request: str, reason: str) -> dict | None:
-    if _offline_fallback_enabled():
-        print(f"[AI Core] {reason} — using explicit offline fallback")
-        return _offline_spec(user_request)
-    print(f"[AI Core] {reason} — offline fallback disabled")
-    return None
+    print(f"[AI Core] {reason} — using offline fallback")
+    return _offline_spec(user_request)
 
 
 def _save_json_spec(spec: dict, user_request: str):
@@ -1049,7 +1046,7 @@ def _is_main_intent(req: str, tokens: tuple) -> bool:
     return False
 
 
-def translator(user_request):
+def translator(user_request, status_callback=None):
     """
     LLM-as-router architecture.
 
@@ -1077,6 +1074,9 @@ def translator(user_request):
     )
 
     print("Builder Model Active...")
+    if status_callback:
+        status_callback("Builder Model active…")
+
     if error_memory_block:
         print(f"[ErrorMemory] Injecting {min(_MAX_ERRORS_TO_INJECT, len(_load_error_memory()))} past mistakes into prompt")
 
@@ -1090,6 +1090,8 @@ def translator(user_request):
             format_json=True,
         )
         print("\n[Builder Model]: JSON received.")
+        if status_callback:
+            status_callback("JSON spec received, validating…")
         spec = extract_json(raw)
 
     except (json.JSONDecodeError, ValueError) as exc:
@@ -1103,12 +1105,18 @@ def translator(user_request):
             ),
         )
         print(f"[AI Core] JSON parse failed: {exc} — trying LLM repair")
-        spec = _repair_llm_json(system_prompt_with_memory, user_request, raw, exc)
+        if status_callback:
+            status_callback("Invalid JSON received — repairing…")
+        spec = _repair_llm_json(system_prompt_with_memory, user_request, raw, exc, status_callback=status_callback)
         if spec is None:
+            if status_callback:
+                status_callback("LLM failed — using offline fallback…")
             spec = _offline_or_none(user_request, "LLM JSON parse failed after repair")
 
     except Exception as exc:
         print(f"[AI Core] LLM failed: {exc}")
+        if status_callback:
+            status_callback("LLM request failed — trying offline fallback…")
         spec = _offline_or_none(user_request, "LLM request failed")
 
     if spec is None:
@@ -1116,19 +1124,30 @@ def translator(user_request):
 
     if not validate_json_spec(spec):
         bad_keys = list(spec.keys()) if isinstance(spec, dict) else []
+        if isinstance(spec, dict) and "parts" in spec and "operations" in spec:
+            lesson = (
+                "Your JSON structure has the correct root keys ('parts' and 'operations') but contains invalid part or operation specifications. "
+                "Ensure every item in 'parts' has 'type' and 'name' fields, and all elements are valid."
+            )
+        else:
+            lesson = (
+                f"You returned keys {bad_keys} instead of 'parts' and 'operations'. "
+                'Return ONLY {"parts": [...], "operations": [...]}.'
+            )
         log_format_error(
             bad_output=raw,
             error_type="wrong_format",
-            lesson=(
-                f"You returned keys {bad_keys} instead of 'parts' and 'operations'. "
-                'Return ONLY {"parts": [...], "operations": [...]}.'
-            ),
+            lesson=lesson,
         )
         print("[AI Core] Invalid spec — trying LLM repair")
-        repaired = _repair_llm_json(system_prompt_with_memory, user_request, raw, ValueError("wrong JSON shape"))
+        if status_callback:
+            status_callback("Invalid JSON structure — repairing…")
+        repaired = _repair_llm_json(system_prompt_with_memory, user_request, raw, ValueError("wrong JSON shape"), status_callback=status_callback)
         if repaired is not None:
             spec = repaired
         else:
+            if status_callback:
+                status_callback("LLM failed — using offline fallback…")
             spec = _offline_or_none(user_request, "LLM returned invalid spec after repair")
 
     if spec is None:
@@ -1143,12 +1162,16 @@ def translator(user_request):
         filename = build_and_save(spec)
     except Exception as exc:
         print(f"[AI Core] Builder failed: {exc}")
+        if status_callback:
+            status_callback("CAD builder failed")
         return None
 
     if not used_asset_reference:
         _register_generated_asset(user_request, spec)
 
     print("[AI Core] Build complete.")
+    if status_callback:
+        status_callback("Spec ready — running FreeCAD…")
     return filename
 
 
