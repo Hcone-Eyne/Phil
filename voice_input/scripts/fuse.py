@@ -26,7 +26,10 @@ part = doc.addObject("Part::Feature", "Fused_Object")
 part.Shape = fused_shape
 
 # saving file in .step extension
-output_path = "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/output/fused.step"
+from pathlib import Path
+_output_dir = Path(__file__).resolve().parent.parent / "output"
+_output_dir.mkdir(parents=True, exist_ok=True)
+output_path = str(_output_dir / "fused.step")
 part.Shape.exportStep(output_path)
 
 print("Sucess!, Saved to", output_path)

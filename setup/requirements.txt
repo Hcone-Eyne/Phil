@@ -1,0 +1,14 @@
+# Phil setup — shared dependencies (installed during setup loading)
+customtkinter
+pillow
+SpeechRecognition
+pyaudio
+
+# API provider SDKs are installed on demand when the user picks a provider:
+#   anthropic          → pip install anthropic
+#   openai             → pip install openai
+#   gemini             → pip install google-generativeai
+#   openrouter         → pip install openai  (same SDK, different base URL)
+
+# Local mode Python client (installed when local setup completes):
+#   ollama             → pip install ollama

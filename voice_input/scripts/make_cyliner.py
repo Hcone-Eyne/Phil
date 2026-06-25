@@ -17,5 +17,8 @@ part = doc.addObject("Part::Feature", "Version_1")
 part.Shape = cylinder
 
 # 4. saving it as .step as it is universal
-output_path = "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/output/cylinder.step"
+from pathlib import Path
+_output_dir = Path(__file__).resolve().parent.parent / "output"
+_output_dir.mkdir(parents=True, exist_ok=True)
+output_path = str(_output_dir / "cylinder.step")
 part.Shape.exportStep(output_path)

@@ -348,7 +348,9 @@ def json_to_freecad(json_spec: dict) -> str:
         "feature = doc.addObject('Part::Feature', 'Shape')",
         "feature.Shape = final_shape",
         "doc.recompute()",
-        f"feature.Shape.exportStep('{ai_gen_folder}/model.step')",
+        "from pathlib import Path",
+        "_step_out = Path(__file__).resolve().parent / 'model.step'",
+        "feature.Shape.exportStep(str(_step_out))",
     ]
 
     return "\n".join(lines)

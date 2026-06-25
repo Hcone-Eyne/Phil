@@ -12,7 +12,7 @@ import ast
 
 from voice_input.Keys.config import (
     output_location, script_location, logs_location,
-    free_cad_cmd, ai_gen_script, ai_gen_folder
+    free_cad_cmd, ai_gen_script, ai_gen_folder, correction_log_path,
 )
 
 # Ensure output and log folders exist
@@ -96,7 +96,7 @@ def execute_cad_scripts(script_name, user_request, status_callback=None):
 
     script_path_use = ai_gen_folder / script_name
     log_report      = logs_location / "error.report.txt"
-    correction_log  = logs_location / "correction.log.txt"
+    correction_log = correction_log_path
 
     # ── Step 1: Defense wall (syntax check) ───────────────────────────────────
     report("Checking script…")

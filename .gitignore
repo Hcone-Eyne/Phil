@@ -1,14 +1,32 @@
-# Ignore the API Keys and local paths
-Keys/
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
 
-# Ignore the generated 3D files and logs
+# ── PyInstaller / packaging (do not commit build artefacts) ───────────────────
+build/
+dist/
+
+# ── Secrets & per-machine config (never commit) ─────────────────────────────
+.env
+.env.*
+phil_config.json
+voice_input/.env
+voice_input/Keys/phil_config.json
+
+# voice_input/Keys/config.py is SOURCE — tracked on purpose (do not add Keys/ here)
+
+# ── Generated CAD output & runtime logs ───────────────────────────────────────
 output/
 logs/
 *.step
-*.json
+*.stp
+*.obj
 
-# Mac system files
+# Runtime JSON (logs/ already covers most; explicit for files outside logs/)
+voice_input/cad_assist/generated_asset_library.json
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
-
-.env

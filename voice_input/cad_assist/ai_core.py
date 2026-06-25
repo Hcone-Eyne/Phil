@@ -16,7 +16,11 @@ except ModuleNotFoundError:
 
 from setup.llm_client import get_client
 from voice_input import stage_manager
-from voice_input.Keys.config import ai_gen_folder
+from voice_input.Keys.config import (
+    ai_gen_folder,
+    error_memory_path,
+    generated_asset_library_path,
+)
 from voice_input.cad_assist.builder import build_and_save
 
 load_dotenv()
@@ -33,17 +37,14 @@ from pathlib import Path
 # and avoids repeating those exact mistakes.
 # This is persistent across sessions — the model gets smarter over time.
 
-# error_memory.json  = LLM format/logic mistakes (this file)
-# correction.log.txt = FreeCAD runtime errors (separate, already exists)
-_ERROR_MEMORY_PATH = Path("/Users/enoch/Desktop/Free_Cad_Extension/voice_input/logs/error_memory.json")
+# error_memory.json  = LLM format/logic mistakes (voice_input.Keys.config)
+# correction.log.txt = FreeCAD runtime errors (config.correction_log_path, used in runner.py)
+_ERROR_MEMORY_PATH = Path(error_memory_path)
+_GENERATED_ASSET_LIBRARY_PATH = Path(generated_asset_library_path)
 
 # How many past errors to inject per prompt
 # 5 is the sweet spot — enough to cover patterns, not enough to confuse 7B
 _MAX_ERRORS_TO_INJECT = 5
-
-_GENERATED_ASSET_LIBRARY_PATH = Path(
-    "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/cad_assist/generated_asset_library.json"
-)
 _MAX_GENERATED_ASSETS = 20
 
 

@@ -17,4 +17,6 @@ final_shape = housing_body
 feature = doc.addObject('Part::Feature', 'Shape')
 feature.Shape = final_shape
 doc.recompute()
-feature.Shape.exportStep('/Users/enoch/Desktop/Free_Cad_Extension/voice_input/scripts/ai_generated_scripts/model.step')
+from pathlib import Path
+_step_out = Path(__file__).resolve().parent / 'model.step'
+feature.Shape.exportStep(str(_step_out))
