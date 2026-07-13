@@ -1,21 +1,23 @@
 {
-  "request": "Write a FreeCAD Python script that creates a flat box named wall_back.\nDimensions: length=6, width=0.15, height=3.\nPosition at X=0, Y=4.85, Z=0. Translate to Y=4.85 only, X and Z stay at 0.\nExport as model.step.",
-  "description": "Make a simple 6 x 0.15 x 3 mm solid block.",
+  "request": "make a gear with 20 diameter",
+  "description": "Make a 20 mm outside-diameter spur gear with exactly 16 teeth and 5 mm thickness.",
   "spec": {
-    "description": "Make a simple 6 x 0.15 x 3 mm solid block.",
+    "description": "Make a 20 mm outside-diameter spur gear with exactly 16 teeth and 5 mm thickness.",
     "parts": [
       {
-        "type": "box",
-        "name": "block",
-        "l": 6.0,
-        "w": 0.15,
-        "h": 3.0
+        "type": "spur_gear",
+        "name": "spur_gear",
+        "diameter": 20,
+        "root_diameter": 15.600000000000001,
+        "teeth": 16,
+        "thickness": 5,
+        "bore_diameter": 4.4
       }
     ],
     "operations": [
       {
         "type": "assign",
-        "part": "block"
+        "part": "spur_gear"
       }
     ]
   }

@@ -724,7 +724,11 @@ def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, err
 
 
 def _offline_or_none(user_request: str, reason: str) -> dict | None:
-    print(f"[AI Core] {reason} — using offline fallback")
+    print(f"[AI Core] {reason} — trying offline fallback")
+    procedural = _parse_procedural_steps(user_request)
+    if procedural is not None:
+        print("[AI Core] Detected procedural step-by-step instructions — parsed directly")
+        return procedural
     return _offline_spec(user_request)
 
 
@@ -759,6 +763,72 @@ def _first_number_near(
             if match:
                 return float(match.group(1))
     return default
+
+
+def _extract_coord(text: str, coord: str, default: float = 0) -> float:
+    match = re.search(
+        rf"{coord}\s*=\s*(-?)\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE
+    )
+    if match:
+        sign = -1 if match.group(1) == "-" else 1
+        return sign * float(match.group(2))
+    return default
+
+
+def _parse_procedural_steps(user_request: str) -> dict | None:
+    req = user_request.strip()
+    step_pattern = re.compile(
+        r"Step\s*(\d+)\s*:\s*(.*?)(?=Step\s*\d+\s*:|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    steps = step_pattern.findall(req)
+    if len(steps) < 2:
+        return None
+
+    parts = []
+    operations = []
+
+    for step_num, step_text in steps:
+        lower_step = step_text.strip().lower()
+
+        box_match = re.search(
+            r"(?:create|make)\s+a\s+box\s+(?:named|called)\s+(\w+)", lower_step
+        )
+        if box_match:
+            name = box_match.group(1)
+            l = _first_number_near(lower_step, ("length", "l", "x"), 10)
+            w = _first_number_near(lower_step, ("width", "w", "y"), 10)
+            h = _first_number_near(lower_step, ("height", "h", "z"), 10)
+            x = _extract_coord(step_text, "x")
+            y = _extract_coord(step_text, "y")
+            z = _extract_coord(step_text, "z")
+
+            part = {"type": "box", "name": name, "l": l, "w": w, "h": h}
+            if x != 0 or y != 0 or z != 0:
+                part["translate"] = [x, y, z]
+
+            parts.append(part)
+            continue
+
+        cut_match = re.search(r"cut\s+(\w+)\s+from\s+(\w+)", lower_step)
+        if cut_match:
+            operations.append(
+                {
+                    "type": "cut",
+                    "base": cut_match.group(2),
+                    "cutters": [cut_match.group(1)],
+                }
+            )
+            continue
+
+    if not parts or not operations:
+        return None
+
+    return {
+        "description": user_request.strip()[:120],
+        "parts": parts,
+        "operations": operations,
+    }
 
 
 def _count_from_words(text: str, default: int = 2) -> int:
