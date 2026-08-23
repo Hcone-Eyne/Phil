@@ -27,7 +27,10 @@ part = doc.addObject("Part::Feature", "Holey_box")
 part.Shape = hollow_box
 
 # saving it as .step extension file
-output_path = "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/output/cut.step"
+from pathlib import Path
+_output_dir = Path(__file__).resolve().parent.parent / "output"
+_output_dir.mkdir(parents=True, exist_ok=True)
+output_path = str(_output_dir / "cut.step")
 part.Shape.exportStep(output_path)
 
 print("Sucess!, Saved to", output_path)

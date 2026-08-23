@@ -1,0 +1,49 @@
+# CELL 3: Load First 3000 Samples (Fast, Low Memory)
+# Only downloads what we need - no disk space issues
+
+from huggingface_hub import login
+from datasets import load_dataset
+
+# ── HuggingFace Token (optional but faster) ──────────────────────────────────
+# Get your token: https://huggingface.co/settings/tokens
+
+HF_TOKEN = ""  # Paste your token here: hf_XXXXXXXXXXXXXXXX
+
+if HF_TOKEN:
+    login(token=HF_TOKEN)
+    print("Logged in to HuggingFace (fast download mode)")
+else:
+    print("No token (anonymous download)")
+
+# ── Load only 3000 samples (streaming + islice) ──────────────────────────────
+
+from itertools import islice
+
+NUM_SAMPLES = 3000  # Only download what we need
+
+print(f"Loading first {NUM_SAMPLES} samples from Zero-to-CAD-100k...")
+print("Streaming mode - downloads on-demand, no disk issues")
+
+dataset = load_dataset(
+    "ADSKAILab/Zero-To-CAD-100k",
+    split="train",
+    streaming=True,
+    token=HF_TOKEN if HF_TOKEN else None,
+)
+
+# Take only first N samples (no full download)
+dataset_list = []
+for sample in islice(dataset, NUM_SAMPLES):
+    dataset_list.append({
+        "cadquery_file": sample["cadquery_file"],
+    })
+
+print(f"Dataset loaded: {len(dataset_list)} samples")
+
+# Show sample
+sample = dataset_list[0]
+code = sample['cadquery_file']
+if isinstance(code, bytes):
+    code = code.decode('utf-8', errors='ignore')
+print(f"\n--- Sample CadQuery code (first 200 chars) ---")
+print(code[:200])

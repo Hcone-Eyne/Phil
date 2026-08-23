@@ -18,7 +18,10 @@ part = doc.addObject("Part::Feature","Version 1")
 part.Shape = sphere
 
 # 4. save it in .step extension
-output_path = "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/output/sphere.step"
+from pathlib import Path
+_output_dir = Path(__file__).resolve().parent.parent / "output"
+_output_dir.mkdir(parents=True, exist_ok=True)
+output_path = str(_output_dir / "sphere.step")
 part.Shape.exportStep(output_path)
 
 print("Sucess!, Saved to",output_path)

@@ -8,22 +8,68 @@ import json
 import os
 import re
 
-try:
-    from dotenv import load_dotenv  # type: ignore
-except ModuleNotFoundError:
-    def load_dotenv(*args, **kwargs):
-        return False
-
 from setup.llm_client import get_client
 from voice_input import stage_manager
-from voice_input.Keys.config import ai_gen_folder
+from voice_input.Keys.config import (
+    ai_gen_folder,
+    error_memory_path,
+    generated_asset_library_path,
+)
 from voice_input.cad_assist.builder import build_and_save
-
-load_dotenv()
-api_key = os.getenv("api_key")
 
 from datetime import datetime
 from pathlib import Path
+
+# ── Unit Conversion ────────────────────────────────────────────────────────────
+# All dimensions in the builder are in millimeters.
+# This converts common units to mm.
+
+_UNIT_MULTIPLIERS = {
+    "cm": 10,
+    "centimeter": 10,
+    "centimeters": 10,
+    "mm": 1,
+    "millimeter": 1,
+    "millimeters": 1,
+    "in": 25.4,
+    "inch": 25.4,
+    "inches": 25.4,
+    "m": 1000,
+    "meter": 1000,
+    "meters": 1000,
+}
+
+
+def _convert_units(text: str) -> str:
+    """Convert units in text to millimeters.
+
+    Examples:
+        "90cm" → "900"
+        "60cm" → "600"
+        "2cm" → "20"
+        "3in" → "76.2"
+        "1m" → "1000"
+        "10mm" → "10"
+    """
+    def replace_match(m):
+        number_str = m.group(1)
+        unit = m.group(2).lower()
+        try:
+            number = float(number_str)
+        except ValueError:
+            return m.group(0)
+        multiplier = _UNIT_MULTIPLIERS.get(unit, 1)
+        result = number * multiplier
+        # Return as integer if no decimal part
+        if result == int(result):
+            return str(int(result))
+        return str(result)
+
+    # Match: number + optional space + unit (order matters: longer units first)
+    # "centimeter" before "centi", "millimeter" before "m", etc.
+    pattern = r'(\d+(?:\.\d+)?)\s*(centimeters?|millimeters?|inches?|meters?|cm|mm|in|m)\b'
+    return re.sub(pattern, replace_match, text, flags=re.IGNORECASE)
+
 
 # ── Error Memory System ────────────────────────────────────────────────────────
 # This is the model's "mistake journal".
@@ -33,17 +79,14 @@ from pathlib import Path
 # and avoids repeating those exact mistakes.
 # This is persistent across sessions — the model gets smarter over time.
 
-# error_memory.json  = LLM format/logic mistakes (this file)
-# correction.log.txt = FreeCAD runtime errors (separate, already exists)
-_ERROR_MEMORY_PATH = Path("/Users/enoch/Desktop/Free_Cad_Extension/voice_input/logs/error_memory.json")
+# error_memory.json  = LLM format/logic mistakes (voice_input.Keys.config)
+# correction.log.txt = FreeCAD runtime errors (config.correction_log_path, used in runner.py)
+_ERROR_MEMORY_PATH = Path(error_memory_path)
+_GENERATED_ASSET_LIBRARY_PATH = Path(generated_asset_library_path)
 
 # How many past errors to inject per prompt
 # 5 is the sweet spot — enough to cover patterns, not enough to confuse 7B
 _MAX_ERRORS_TO_INJECT = 5
-
-_GENERATED_ASSET_LIBRARY_PATH = Path(
-    "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/cad_assist/generated_asset_library.json"
-)
 _MAX_GENERATED_ASSETS = 20
 
 
@@ -157,7 +200,10 @@ def _save_generated_asset_library(assets: dict):
 
 def _asset_key_from_request(user_request: str) -> str:
     text = user_request.lower()
-    text = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mm|millimeter|millimeters|cm|inch|inches)?\b", " ", text)
+    # Remove dimension numbers with units (e.g., "10mm", "5 cm", "3in")
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mm|millimeter|millimeters|cm|centimeter|centimeters|in|inch|inches|m|meter|meters)\b", " ", text)
+    # Remove bare numbers that look like dimensions (standalone or with "mm")
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mm|millimeter|millimeters|cm|centimeter|centimeters)?\b", " ", text)
     words = re.findall(r"[a-z][a-z0-9_]*", text)
     stop_words = {
         "a", "an", "and", "the", "with", "without", "make", "create", "build",
@@ -497,6 +543,87 @@ SHAPE_PATTERNS = {
         ],
         "operations": [{"type": "assign", "part": "pipe_body"}],
     },
+    "phone_stand": {
+        "description": (
+            "Make a simple phone stand with an angled back support "
+            "(~65 degrees from horizontal), a bottom lip to cradle the phone, "
+            "and a stable base."
+        ),
+        "parts": [
+            {
+                "type": "box",
+                "name": "base",
+                "l": 80,
+                "w": 60,
+                "h": 6,
+            },
+            {
+                "type": "box",
+                "name": "back_support",
+                "l": 6,
+                "w": 60,
+                "h": 70,
+                "rotate": {"axis": [0, 1, 0], "angle": 25},
+                "translate": [10, 0, 6],
+            },
+            {
+                "type": "box",
+                "name": "phone_lip",
+                "l": 6,
+                "w": 60,
+                "h": 10,
+                "translate": [2, 0, 6],
+            },
+        ],
+        "operations": [{"type": "fuse_all"}],
+    },
+    "desk": {
+        "description": (
+            "Make a simple desk with a flat tabletop and four legs at the corners."
+        ),
+        "parts": [
+            {
+                "type": "box",
+                "name": "tabletop",
+                "l": 1200,
+                "w": 600,
+                "h": 30,
+            },
+            {
+                "type": "box",
+                "name": "leg_1",
+                "l": 40,
+                "w": 40,
+                "h": 720,
+                "translate": [20, 20, -720],
+            },
+            {
+                "type": "box",
+                "name": "leg_2",
+                "l": 40,
+                "w": 40,
+                "h": 720,
+                "translate": [1140, 20, -720],
+            },
+            {
+                "type": "box",
+                "name": "leg_3",
+                "l": 40,
+                "w": 40,
+                "h": 720,
+                "translate": [20, 540, -720],
+            },
+            {
+                "type": "box",
+                "name": "leg_4",
+                "l": 40,
+                "w": 40,
+                "h": 720,
+                "translate": [1140, 540, -720],
+            },
+        ],
+        "operations": [{"type": "fuse_all"}],
+    },
 }
 
 SHAPE_KEYWORDS = {
@@ -515,21 +642,14 @@ SHAPE_KEYWORDS = {
     "plate": ["plate", "mounting plate", "base plate"],
     "shaft": ["shaft", "axle", "keyway"],
     "aeroplane": ["aeroplane", "airplane", "plane", "aircraft"],
-    "bolt": ["bolt", "hex bolt", "screw"],
+    "bolt": ["bolt", "hex bolt", "screw", "m3 bolt", "m4 bolt", "m6 bolt", "m8 bolt"],
     "pipe": ["pipe", "tube", "hollow cylinder"],
+    "phone_stand": ["phone stand", "phone holder", "phone dock", "phone cradle", "display stand"],
+    "desk": ["desk", "table", "workbench", "writing desk", "office desk"],
+    "cork_board": ["cork board", "notice board", "bulletin board", "pin board"],
+    "frame": ["frame", "border frame", "picture frame", "wood frame"],
+    "panel": ["panel", "board", "flat panel", "sheet"],
 }
-
-
-def get_pattern_json(user_request):
-    req = user_request.lower()
-    if "gear" in req and any(token in req for token in ("sg90", "servo", "robotic arm")):
-        return SHAPE_PATTERNS["sg90_gear_arm"]
-    for shape, keywords in SHAPE_KEYWORDS.items():
-        if any(keyword in req for keyword in keywords):
-            # Only use pattern if keyword is the main subject, not a feature mention
-            if _is_main_intent(req, tuple(keywords)):
-                return SHAPE_PATTERNS[shape]
-    return None
 
 
 JSON_SYSTEM_RULE = """You are a FreeCAD 3D model spec generator.
@@ -694,7 +814,7 @@ def extract_json(raw: str) -> dict:
     return json.loads(clean[start:end])
 
 
-def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, error: Exception) -> dict | None:
+def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, error: Exception, status_callback=None) -> dict | None:
     repair_prompt = (
         "Your previous response could not be used as a FreeCAD JSON spec.\n"
         f"Original build request: {user_request}\n\n"
@@ -710,24 +830,97 @@ def _repair_llm_json(system_prompt: str, user_request: str, bad_output: str, err
         )
         repaired = extract_json(repaired_raw)
         if validate_json_spec(repaired):
-            print("[AI Core] LLM JSON repaired successfully.")
+            msg = "[AI Core] LLM JSON repaired successfully."
+            print(msg)
+            if status_callback:
+                status_callback("Spec repaired successfully! ✓")
             return repaired
     except Exception as repair_exc:
         print(f"[AI Core] LLM repair failed: {repair_exc}")
     return None
 
 
+
+
+def _allow_python_code_enabled() -> bool:
+    """Check if direct Python code output is allowed (temporary feature)."""
+    # 1. Check environment variable (highest priority)
+    env_val = os.getenv("PHIL_ALLOW_PYTHON_CODE", "").strip().lower()
+    if env_val in {"0", "false", "no", "off"}:
+        return False
+    if env_val in {"1", "true", "yes", "on"}:
+        return True
+
+    # 2. Check phil_config.json
+    try:
+        from voice_input.Keys.config import phil_config_path
+        if phil_config_path.exists():
+            with open(phil_config_path, "r") as f:
+                config = json.load(f)
+                val = config.get("allow_python_code")
+                if val is not None:
+                    return bool(val)
+    except Exception:
+        pass
+    return False
+
+
+def _is_freecad_script(raw: str) -> bool:
+    """Detect if the LLM returned a FreeCAD Python script instead of JSON."""
+    indicators = ["import FreeCAD", "Part.make", "final_shape", "exportStep"]
+    count = sum(1 for ind in indicators if ind in raw)
+    return count >= 2
+
+
+def _save_freecad_script(script: str) -> str:
+    """Save a raw FreeCAD script directly and return its filename."""
+    clean = script.replace("```python", "").replace("```", "").strip()
+    with open(ai_gen_script, "w") as f:
+        f.write(clean)
+    print(f"[AI Core] Direct FreeCAD script saved -> {ai_gen_script}")
+    return "ai_gen_script.py"
+
+
 def _offline_fallback_enabled() -> bool:
-    value = os.getenv("PHIL_ALLOW_OFFLINE_FALLBACK", "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    # 1. Check environment variable (highest priority)
+    env_val = os.getenv("PHIL_ALLOW_OFFLINE_FALLBACK", "").strip().lower()
+    if env_val in {"0", "false", "no", "off"}:
+        return False
+    if env_val in {"1", "true", "yes", "on"}:
+        return True
+
+    # 2. Check phil_config.json
+    try:
+        from voice_input.Keys.config import phil_config_path
+        if phil_config_path.exists():
+            with open(phil_config_path, "r") as f:
+                config = json.load(f)
+                val = config.get("allow_offline_fallback")
+                if val is not None:
+                    return bool(val)
+    except Exception:
+        pass
+    return True
+
+
+def _debug_log(msg: str):
+    """Centralized debug logging for tracing the translator pipeline."""
+    print(f"[DEBUG] {msg}")
 
 
 def _offline_or_none(user_request: str, reason: str) -> dict | None:
-    if _offline_fallback_enabled():
-        print(f"[AI Core] {reason} — using explicit offline fallback")
-        return _offline_spec(user_request)
-    print(f"[AI Core] {reason} — offline fallback disabled")
-    return None
+    if not _offline_fallback_enabled():
+        print(f"[AI Core] {reason} — offline fallback is temporarily disabled")
+        return None
+    _debug_log(f"OFFLINE FALLBACK TRIGGERED: {reason}")
+    print(f"[AI Core] {reason} — trying offline fallback")
+    procedural = _parse_procedural_steps(user_request)
+    if procedural is not None:
+        _debug_log("Procedural steps detected and parsed")
+        print("[AI Core] Detected procedural step-by-step instructions — parsed directly")
+        return procedural
+    _debug_log("No procedural steps, calling _offline_spec()")
+    return _offline_spec(user_request)
 
 
 def _save_json_spec(spec: dict, user_request: str):
@@ -753,14 +946,84 @@ def _first_number_near(
     text: str, words: tuple[str, ...], default: float, allow_before: bool = True
 ) -> float:
     for word in words:
-        match = re.search(rf"{word}\D{{0,20}}(\d+(?:\.\d+)?)", text)
-        if match:
-            return float(match.group(1))
+        # When allow_before is True, try "number before word" FIRST
+        # This is more reliable for patterns like "900 wide" or "600 tall"
         if allow_before:
             match = re.search(rf"(\d+(?:\.\d+)?)\s*(?:mm|millimeter|millimeters)?\s+{word}", text)
             if match:
                 return float(match.group(1))
+        # Then try "word followed by number" — but require comma or end after number
+        # to avoid picking up numbers that belong to other dimensions
+        match = re.search(rf"{word}\D{{0,20}}(\d+(?:\.\d+)?)[,.\s]|{word}\D{{0,20}}(\d+(?:\.\d+)?)$", text)
+        if match:
+            return float(match.group(1) or match.group(2))
     return default
+
+
+def _extract_coord(text: str, coord: str, default: float = 0) -> float:
+    match = re.search(
+        rf"{coord}\s*=\s*(-?)\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE
+    )
+    if match:
+        sign = -1 if match.group(1) == "-" else 1
+        return sign * float(match.group(2))
+    return default
+
+
+def _parse_procedural_steps(user_request: str) -> dict | None:
+    req = user_request.strip()
+    step_pattern = re.compile(
+        r"Step\s*(\d+)\s*:\s*(.*?)(?=Step\s*\d+\s*:|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    steps = step_pattern.findall(req)
+    if len(steps) < 2:
+        return None
+
+    parts = []
+    operations = []
+
+    for step_num, step_text in steps:
+        lower_step = step_text.strip().lower()
+
+        box_match = re.search(
+            r"(?:create|make)\s+a\s+box\s+(?:named|called)\s+(\w+)", lower_step
+        )
+        if box_match:
+            name = box_match.group(1)
+            l = _first_number_near(lower_step, ("length", "l", "x"), 10)
+            w = _first_number_near(lower_step, ("width", "w", "y"), 10)
+            h = _first_number_near(lower_step, ("height", "h", "z"), 10)
+            x = _extract_coord(step_text, "x")
+            y = _extract_coord(step_text, "y")
+            z = _extract_coord(step_text, "z")
+
+            part = {"type": "box", "name": name, "l": l, "w": w, "h": h}
+            if x != 0 or y != 0 or z != 0:
+                part["translate"] = [x, y, z]
+
+            parts.append(part)
+            continue
+
+        cut_match = re.search(r"cut\s+(\w+)\s+from\s+(\w+)", lower_step)
+        if cut_match:
+            operations.append(
+                {
+                    "type": "cut",
+                    "base": cut_match.group(2),
+                    "cutters": [cut_match.group(1)],
+                }
+            )
+            continue
+
+    if not parts or not operations:
+        return None
+
+    return {
+        "description": user_request.strip()[:120],
+        "parts": parts,
+        "operations": operations,
+    }
 
 
 def _count_from_words(text: str, default: int = 2) -> int:
@@ -998,7 +1261,7 @@ def _offline_spec(user_request: str) -> dict:
             sy = int(_first_number_near(req, ("long", "rows", "deep"), 2))
         stud_d = _first_number_near(req, ("stud diameter", "diameter"), 4.8)
         stud_h = _first_number_near(req, ("stud height",), 1.8)
-        hollow = "hollow" in req or "open" in req or True
+        hollow = "hollow" in req or "open" in req
         return {
             "description": f"Make a {sx}x{sy} Lego brick with hollow bottom.",
             "parts": [
@@ -1017,10 +1280,120 @@ def _offline_spec(user_request: str) -> dict:
             "operations": [{"type": "assign", "part": "lego_brick"}],
         }
 
+    # ── Bolt / Screw detection ─────────────────────────────────────────────
+    if any(token in req for token in ("bolt", "screw", "hex bolt", "hex screw")):
+        # Parse M-size: "m6" → 6mm shaft diameter
+        m_match = re.search(r"m\s*(\d+(?:\.\d+)?)", req)
+        if m_match:
+            shaft_d = float(m_match.group(1))
+        else:
+            shaft_d = _first_number_near(req, ("diameter", "dia", "shaft"), 6, allow_before=False)
+        shaft_r = shaft_d / 2
+        head_r = shaft_r * 1.5  # Hex head ~1.5x shaft radius
+        head_h = shaft_r * 1.2  # Head height ~1.2x shaft radius
+        length = _first_number_near(req, ("long", "length", "thread"), 20, allow_before=False)
+        return {
+            "description": f"Make an M{shaft_d:g} bolt, {length:g} mm long.",
+            "parts": [
+                {"type": "hex_prism", "name": "bolt_head", "r": head_r, "h": head_h},
+                {
+                    "type": "cylinder",
+                    "name": "bolt_shaft",
+                    "r": shaft_r,
+                    "h": length,
+                    "translate": [0, 0, head_h],
+                },
+            ],
+            "operations": [{"type": "fuse_all"}],
+        }
+
+    # ── Phone stand detection ──────────────────────────────────────────────
+    if any(token in req for token in ("phone stand", "phone holder", "phone dock", "phone cradle", "display stand")):
+        return SHAPE_PATTERNS["phone_stand"]
+
+    # ── Desk detection ─────────────────────────────────────────────────────
+    if any(token in req for token in ("desk", "table", "workbench", "writing desk", "office desk")):
+        return SHAPE_PATTERNS["desk"]
+
+    # ── Cork board / Notice board detection ────────────────────────────────
+    if any(token in req for token in ("cork board", "notice board", "bulletin board", "pin board")):
+        # Parse dimensions from request
+        # Use allow_before=True so "900 wide" is matched (number before word)
+        w = _first_number_near(req, ("wide", "width"), 900, allow_before=True)
+        h = _first_number_near(req, ("tall", "height", "high"), 600, allow_before=True)
+        t = _first_number_near(req, ("thick", "thickness"), 20, allow_before=True)
+        fw = _first_number_near(req, ("frame", "border"), 30, allow_before=True)
+        fp = _first_number_near(req, ("protrude", "protrusion", "stick out"), 10, allow_before=True)
+        return {
+            "description": (
+                f"Make a {w:g} x {h:g} x {t:g} mm cork board with a "
+                f"{fw:g} mm wide frame border."
+            ),
+            "parts": [
+                {
+                    "type": "cork_board",
+                    "name": "cork_board",
+                    "width": w,
+                    "height": h,
+                    "thickness": t,
+                    "frame_width": fw,
+                    "frame_protrusion": fp,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "cork_board"}],
+        }
+
+    # ── Frame detection ────────────────────────────────────────────────────
+    if any(token in req for token in ("frame", "border frame", "picture frame")):
+        iw = _first_number_near(req, ("wide", "width", "inner width"), 80, allow_before=False)
+        ih = _first_number_near(req, ("tall", "height", "inner height"), 60, allow_before=False)
+        bw = _first_number_near(req, ("border", "frame"), 3, allow_before=False)
+        d = _first_number_near(req, ("deep", "depth", "thick"), 2, allow_before=False)
+        return {
+            "description": (
+                f"Make a {iw:g} x {ih:g} mm frame with {bw:g} mm border."
+            ),
+            "parts": [
+                {
+                    "type": "frame",
+                    "name": "frame",
+                    "inner_width": iw,
+                    "inner_height": ih,
+                    "border_width": bw,
+                    "depth": d,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "frame"}],
+        }
+
+    # ── Panel detection ────────────────────────────────────────────────────
+    if any(token in req for token in ("panel", "board", "flat panel")):
+        w = _first_number_near(req, ("wide", "width"), 100, allow_before=False)
+        h = _first_number_near(req, ("tall", "height"), 80, allow_before=False)
+        t = _first_number_near(req, ("thick", "thickness"), 2, allow_before=True)
+        return {
+            "description": (
+                f"Make a {w:g} x {h:g} x {t:g} mm panel."
+            ),
+            "parts": [
+                {
+                    "type": "panel",
+                    "name": "panel",
+                    "width": w,
+                    "height": h,
+                    "thickness": t,
+                }
+            ],
+            "operations": [{"type": "assign", "part": "panel"}],
+        }
+
+    # ── Default fallback: simple box from first 3 numbers ─────────────────────
+    # This triggers when NO keyword pattern matches — indicates unrecognized prompt
     nums = _numbers(req)
     l = nums[0] if len(nums) > 0 else 10
     w = nums[1] if len(nums) > 1 else l
     h = nums[2] if len(nums) > 2 else l
+    _debug_log(f"DEFAULT FALLBACK (box): no keyword matched, nums={nums}, returning {l}x{w}x{h} box")
     return {
         "description": f"Make a simple {l:g} x {w:g} x {h:g} mm solid block.",
         "parts": [{"type": "box", "name": "block", "l": l, "w": w, "h": h}],
@@ -1034,7 +1407,6 @@ def _is_main_intent(req: str, tokens: tuple) -> bool:
     not just mentioning it as a feature (e.g. 'shaft holes', 'bracket mount').
     Checks that the token appears near the start or as the dominant noun.
     """
-    import re
     for token in tokens:
         if token not in req:
             continue
@@ -1048,7 +1420,13 @@ def _is_main_intent(req: str, tokens: tuple) -> bool:
     return False
 
 
-def translator(user_request):
+def _debug_log(msg: str):
+    """Debug logging with timestamp for tracing execution path."""
+    import time
+    print(f"[TRACE {time.strftime('%H:%M:%S')}] {msg}")
+
+
+def translator(user_request, status_callback=None):
     """
     LLM-as-router architecture.
 
@@ -1064,6 +1442,9 @@ def translator(user_request):
 
     Fallback: _offline_spec() only fires if LLM fails completely.
     """
+    # Convert units (cm, in, m → mm) before processing
+    user_request = _convert_units(user_request)
+
     previous_memory = stage_manager.get_memory()
 
     error_memory_block = _build_error_memory_prompt()
@@ -1076,22 +1457,44 @@ def translator(user_request):
     )
 
     print("Builder Model Active...")
+    _debug_log("translator() called")
+    if status_callback:
+        status_callback("Builder Model active…")
+
     if error_memory_block:
-        print(f"[ErrorMemory] Injecting {min(_MAX_ERRORS_TO_INJECT, len(_load_error_memory()))} past mistakes into prompt")
+        _debug_log(f"ErrorMemory: injecting {min(_MAX_ERRORS_TO_INJECT, len(_load_error_memory()))} past mistakes")
 
     raw = ""
     try:
         # format_json=True = constrained decoding in local mode
         # In API mode it's ignored — API models reliably return JSON from the prompt alone
+        _debug_log("Calling LLM (get_client().chat)...")
         raw = get_client().chat(
             system=system_prompt_with_memory,
             user=user_prompt,
             format_json=True,
         )
-        print("\n[Builder Model]: JSON received.")
+        _debug_log("LLM response received")
+        print("\n[Builder Model]: Response received.")
+
+        # TEMPORARY: If allow_python_code is enabled and model returned Python, use it directly
+        if _allow_python_code_enabled() and _is_freecad_script(raw):
+            _debug_log("Direct Python script detected (allow_python_code=True)")
+            print("[AI Core] Detected FreeCAD Python script — using directly (allow_python_code=True)")
+            if status_callback:
+                status_callback("Direct Python code detected — saving script…")
+            script_name = _save_freecad_script(raw)
+            # Save a placeholder spec for UI preview
+            _save_json_spec({"description": user_request, "parts": [], "operations": []}, user_request)
+            return script_name
+
+        if status_callback:
+            status_callback("JSON spec received, validating…")
         spec = extract_json(raw)
+        _debug_log("JSON extracted successfully")
 
     except (json.JSONDecodeError, ValueError) as exc:
+        _debug_log(f"JSON parse failed: {exc}")
         log_format_error(
             bad_output=raw,
             error_type="invalid_json",
@@ -1102,97 +1505,136 @@ def translator(user_request):
             ),
         )
         print(f"[AI Core] JSON parse failed: {exc} — trying LLM repair")
-        spec = _repair_llm_json(system_prompt_with_memory, user_request, raw, exc)
+        if status_callback:
+            status_callback("Invalid JSON received — repairing…")
+        spec = _repair_llm_json(system_prompt_with_memory, user_request, raw, exc, status_callback=status_callback)
         if spec is None:
+            # Helpful hint: if model returned Python code, suggest enabling allow_python_code
+            if _is_freecad_script(raw):
+                _debug_log("Model returned Python code; suggest allow_python_code")
+                print("[AI Core] HINT: Model returned Python code. Enable 'allow_python_code' in phil_config.json to use it directly.")
+            if status_callback:
+                status_callback("LLM failed — using offline fallback…")
             spec = _offline_or_none(user_request, "LLM JSON parse failed after repair")
 
     except Exception as exc:
+        _debug_log(f"LLM request failed: {exc}")
         print(f"[AI Core] LLM failed: {exc}")
+        if status_callback:
+            status_callback("LLM request failed — trying offline fallback…")
         spec = _offline_or_none(user_request, "LLM request failed")
 
     if spec is None:
+        _debug_log("spec is None after all attempts — returning None")
         return None
 
     if not validate_json_spec(spec):
         bad_keys = list(spec.keys()) if isinstance(spec, dict) else []
+        if isinstance(spec, dict) and "parts" in spec and "operations" in spec:
+            lesson = (
+                "Your JSON structure has the correct root keys ('parts' and 'operations') but contains invalid part or operation specifications. "
+                "Ensure every item in 'parts' has 'type' and 'name' fields, and all elements are valid."
+            )
+        else:
+            lesson = (
+                f"You returned keys {bad_keys} instead of 'parts' and 'operations'. "
+                'Return ONLY {"parts": [...], "operations": [...]}.'
+            )
         log_format_error(
             bad_output=raw,
             error_type="wrong_format",
-            lesson=(
-                f"You returned keys {bad_keys} instead of 'parts' and 'operations'. "
-                'Return ONLY {"parts": [...], "operations": [...]}.'
-            ),
+            lesson=lesson,
         )
+        _debug_log(f"Invalid spec structure: {bad_keys}")
         print("[AI Core] Invalid spec — trying LLM repair")
-        repaired = _repair_llm_json(system_prompt_with_memory, user_request, raw, ValueError("wrong JSON shape"))
+        if status_callback:
+            status_callback("Invalid JSON structure — repairing…")
+        repaired = _repair_llm_json(system_prompt_with_memory, user_request, raw, ValueError("wrong JSON shape"), status_callback=status_callback)
         if repaired is not None:
+            _debug_log("LLM repair succeeded")
             spec = repaired
         else:
+            _debug_log("LLM repair failed — using offline fallback")
+            if status_callback:
+                status_callback("LLM failed — using offline fallback…")
             spec = _offline_or_none(user_request, "LLM returned invalid spec after repair")
 
     if spec is None:
+        _debug_log("spec still None after repair/fallback")
         return None
 
+    _debug_log(f"Spec validated: {spec.get('parts', [])} parts, {spec.get('operations', [])} ops")
     used_asset_reference = _uses_asset_reference(spec)
     spec = _expand_asset_references(spec)
 
     _save_json_spec(spec, user_request)
 
     try:
+        _debug_log("Calling build_and_save()...")
         filename = build_and_save(spec)
+        _debug_log(f"build_and_save() returned: {filename}")
     except Exception as exc:
+        _debug_log(f"Builder failed: {exc}")
         print(f"[AI Core] Builder failed: {exc}")
+        if status_callback:
+            status_callback("CAD builder failed")
         return None
 
     if not used_asset_reference:
         _register_generated_asset(user_request, spec)
 
     print("[AI Core] Build complete.")
+    if status_callback:
+        status_callback("Spec ready — running FreeCAD…")
     return filename
 
 
 def _expand_asset_references(spec: dict) -> dict:
-    """
-    If the LLM used type="asset:name" to reference a ready-made part,
-    expand it into the full part spec, letting the LLM override dimensions.
+    """Expand ready-made asset references into builder-supported part specs.
 
-    Example:
-        LLM returns: {"type": "asset:flange", "name": "output_flange", "outer_diameter": 50}
-        Builder gets: full flange spec with outer_diameter overridden to 50
-
-    This lets the LLM compose and customise patterns without knowing
-    every internal parameter — it just says which pattern and what to change.
+    The prompt asks the LLM to use type="asset:name", but smaller/local
+    models sometimes return the bare asset key, such as "ten_tooth_gear".
+    Treat both forms as asset references so they do not fall through to the
+    builder's generic box fallback.
     """
     if "parts" not in spec:
         return spec
+
+    import copy
+    spec = copy.deepcopy(spec)
+    assets = _asset_library()
+
+    def _asset_name(ptype: str) -> str | None:
+        if ptype.startswith(("asset:", "pattern:")):
+            return ptype.split(":", 1)[1]
+        if ptype in assets:
+            return ptype
+        return None
 
     parts = spec.get("parts", [])
     if len(parts) == 1:
         only_part = parts[0]
         ptype = only_part.get("type", "")
-        if isinstance(ptype, str) and (ptype.startswith("asset:") or ptype.startswith("pattern:")):
-            asset_name = ptype.split(":", 1)[1]
-            asset = _asset_library().get(asset_name, {})
-            asset_spec = asset.get("spec")
-            if asset_spec and len(asset_spec.get("parts", [])) > 1:
-                print(f"[AI Core] Expanded full asset: {asset_name}")
-                return _clone_json(asset_spec)
+        asset_name = _asset_name(ptype) if isinstance(ptype, str) else None
+        asset_spec = assets.get(asset_name, {}).get("spec") if asset_name else None
+        if asset_spec and len(asset_spec.get("parts", [])) > 1:
+            print(f"[AI Core] Expanded full asset: {asset_name}")
+            expanded_spec = _clone_json(asset_spec)
+            if not spec.get("operations"):
+                return expanded_spec
+            expanded_spec["operations"] = spec.get("operations", [])
+            return expanded_spec
 
     expanded = []
     for part in parts:
         ptype = part.get("type", "")
-        if ptype.startswith("asset:") or ptype.startswith("pattern:"):
-            pattern_name = ptype.split(":", 1)[1]
-            asset = _asset_library().get(pattern_name, {})
-            pattern = asset.get("spec")
-            if pattern and pattern.get("parts"):
-                # Use first part of pattern as base, override with LLM's values
-                base = dict(pattern["parts"][0])
-                base.update({k: v for k, v in part.items() if k != "type"})
-                expanded.append(base)
-                print(f"[AI Core] Expanded asset: {pattern_name}")
-            else:
-                expanded.append(part)
+        asset_name = _asset_name(ptype) if isinstance(ptype, str) else None
+        asset_spec = assets.get(asset_name, {}).get("spec") if asset_name else None
+        if asset_spec and asset_spec.get("parts"):
+            base = dict(asset_spec["parts"][0])
+            base.update({k: v for k, v in part.items() if k != "type"})
+            expanded.append(base)
+            print(f"[AI Core] Expanded asset: {asset_name}")
         else:
             expanded.append(part)
 

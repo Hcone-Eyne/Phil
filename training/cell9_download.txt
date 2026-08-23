@@ -1,0 +1,54 @@
+# CELL 9: Auto-Download Adapter (run before sleeping or when done)
+# Downloads the trained .pt files from Drive to your local machine
+
+import os
+import shutil
+from pathlib import Path
+from google.colab import files
+
+# Paths
+ADAPTER_DIR = Path("/content/drive/MyDrive/phil-checkpoints/qlora-cadquery-final")
+LOCAL_DOWNLOAD = Path("/content/phil-cadquery-lora")
+
+print("=== Preparing Adapter for Download ===\n")
+
+# Check if adapter exists
+if not ADAPTER_DIR.exists():
+    print(f"ERROR: Adapter not found at {ADAPTER_DIR}")
+    print("Make sure you ran Cell 7 (training) first.")
+else:
+    # Copy to local Colab storage for download
+    if LOCAL_DOWNLOAD.exists():
+        shutil.rmtree(LOCAL_DOWNLOAD)
+    shutil.copytree(ADAPTER_DIR, LOCAL_DOWNLOAD)
+
+    # List files
+    files = list(LOCAL_DOWNLOAD.glob("*"))
+    total_size = sum(f.stat().st_size for f in files if f.is_file())
+
+    print(f"Adapter location: {ADAPTER_DIR}")
+    print(f"Files ready for download:")
+    for f in files:
+        if f.is_file():
+            size_mb = f.stat().st_size / 1024 / 1024
+            print(f"  - {f.name} ({size_mb:.2f} MB)")
+    print(f"\nTotal size: {total_size / 1024 / 1024:.2f} MB")
+
+    # Create zip for easier download
+    zip_path = Path("/content/phil-cadquery-lora.zip")
+    shutil.make_archive(str(zip_path.with_suffix('')), 'zip', LOCAL_DOWNLOAD)
+    zip_size = zip_path.stat().st_size / 1024 / 1024
+    print(f"\nZipped: {zip_path.name} ({zip_size:.2f} MB)")
+
+    # Download
+    print("\nDownloading...")
+    files.download(str(zip_path))
+    print("\nDownload complete!")
+    print("\nTo use in Phil, unzip and place in:")
+    print("  /Users/enoch/Desktop/Phil/models/phil-cadquery-lora/")
+
+# Also save training log
+print("\n=== Training Summary ===")
+print(f"Checkpoint root: /content/drive/MyDrive/phil-checkpoints/")
+print(f"Final adapter: {ADAPTER_DIR}")
+print(f"Files saved to Google Drive (persistent)")

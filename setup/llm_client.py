@@ -111,6 +111,7 @@ class LLMClient:
         *,
         format_json: bool = False,
         max_tokens: int = 2048,
+        timeout: float = 120.0,
     ) -> str:
         """
         Send a chat message and return the response as a plain string.
@@ -121,15 +122,16 @@ class LLMClient:
             format_json — if True, hint to the model to return only JSON
                           (uses Ollama's native format="json" in local mode)
             max_tokens  — maximum tokens in the response
+            timeout     — timeout in seconds for the request
 
         Returns:
             The model's response as a plain string.
             Raises LLMError on unrecoverable failure.
         """
         if self.mode == "local":
-            return self._chat_local(system, user, format_json=format_json)
+            return self._chat_local(system, user, format_json=format_json, timeout=timeout)
         else:
-            return self._chat_api(system, user, max_tokens=max_tokens)
+            return self._chat_api(system, user, max_tokens=max_tokens, timeout=timeout)
 
     def is_ready(self) -> bool:
         """
@@ -148,7 +150,7 @@ class LLMClient:
 
     # ── Local Mode (Ollama) ───────────────────────────────────────────────────
 
-    def _chat_local(self, system: str, user: str, *, format_json: bool) -> str:
+    def _chat_local(self, system: str, user: str, *, format_json: bool, timeout: float = 120.0) -> str:
         """
         Route to Ollama running locally.
 
@@ -171,35 +173,39 @@ class LLMClient:
         }
 
         # format="json" = constrained decoding — only valid JSON tokens allowed
-        # Only apply when we actually need JSON output (ai_core.py calls)
         if format_json:
             kwargs["format"] = "json"
 
         try:
-            response = ollama.chat(**kwargs)
+            try:
+                client = ollama.Client(timeout=timeout)
+                response = client.chat(**kwargs)
+            except AttributeError:
+                # Fallback for older versions of ollama package
+                response = ollama.chat(**kwargs)
             return response.message.content
         except Exception as exc:
             raise LLMError(f"Ollama chat failed: {exc}") from exc
 
     # ── API Mode ──────────────────────────────────────────────────────────────
 
-    def _chat_api(self, system: str, user: str, *, max_tokens: int) -> str:
+    def _chat_api(self, system: str, user: str, *, max_tokens: int, timeout: float = 120.0) -> str:
         """
         Route to the configured API provider.
         Each provider has its own SDK but the same input/output contract.
         """
         if self.provider == "anthropic":
-            return self._chat_anthropic(system, user, max_tokens=max_tokens)
+            return self._chat_anthropic(system, user, max_tokens=max_tokens, timeout=timeout)
         elif self.provider == "openai":
-            return self._chat_openai(system, user, max_tokens=max_tokens)
+            return self._chat_openai(system, user, max_tokens=max_tokens, timeout=timeout)
         elif self.provider == "gemini":
-            return self._chat_gemini(system, user, max_tokens=max_tokens)
+            return self._chat_gemini(system, user, max_tokens=max_tokens, timeout=timeout)
         elif self.provider == "openrouter":
-            return self._chat_openrouter(system, user, max_tokens=max_tokens)
+            return self._chat_openrouter(system, user, max_tokens=max_tokens, timeout=timeout)
         else:
             raise LLMError(f"Unknown provider: {self.provider!r}. Choose from {SUPPORTED_PROVIDERS}")
 
-    def _chat_anthropic(self, system: str, user: str, *, max_tokens: int) -> str:
+    def _chat_anthropic(self, system: str, user: str, *, max_tokens: int, timeout: float = 120.0) -> str:
         """Anthropic Claude via official SDK."""
         try:
             import anthropic  # type: ignore
@@ -207,7 +213,7 @@ class LLMClient:
             raise LLMError("anthropic package not installed. Run: pip install anthropic")
 
         api_key = self._get_api_key("ANTHROPIC_API_KEY")
-        client  = anthropic.Anthropic(api_key=api_key)
+        client  = anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
         message = client.messages.create(
             model=self.model,
@@ -221,7 +227,7 @@ class LLMClient:
             if hasattr(block, "text")
         )
 
-    def _chat_openai(self, system: str, user: str, *, max_tokens: int) -> str:
+    def _chat_openai(self, system: str, user: str, *, max_tokens: int, timeout: float = 120.0) -> str:
         """OpenAI GPT via official SDK."""
         try:
             from openai import OpenAI  # type: ignore
@@ -229,7 +235,7 @@ class LLMClient:
             raise LLMError("openai package not installed. Run: pip install openai")
 
         api_key = self._get_api_key("OPENAI_API_KEY")
-        client  = OpenAI(api_key=api_key)
+        client  = OpenAI(api_key=api_key, timeout=timeout)
 
         completion = client.chat.completions.create(
             model=self.model,
@@ -241,7 +247,7 @@ class LLMClient:
         )
         return completion.choices[0].message.content or ""
 
-    def _chat_gemini(self, system: str, user: str, *, max_tokens: int) -> str:
+    def _chat_gemini(self, system: str, user: str, *, max_tokens: int, timeout: float = 120.0) -> str:
         """Google Gemini via google-generativeai SDK."""
         try:
             import google.generativeai as genai  # type: ignore
@@ -265,10 +271,11 @@ class LLMClient:
             generation_config=genai.types.GenerationConfig(
                 max_output_tokens=max_tokens,
             ),
+            request_options={"timeout": timeout},
         )
         return response.text or ""
 
-    def _chat_openrouter(self, system: str, user: str, *, max_tokens: int) -> str:
+    def _chat_openrouter(self, system: str, user: str, *, max_tokens: int, timeout: float = 120.0) -> str:
         """
         OpenRouter via their OpenAI-compatible API.
         OpenRouter supports hundreds of models under one API key.
@@ -285,6 +292,7 @@ class LLMClient:
         client = OpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
+            timeout=timeout,
         )
 
         completion = client.chat.completions.create(
@@ -364,10 +372,29 @@ class LLMError(Exception):
 
 
 # ── Convenience function for callers that just want a quick client ────────────
+_cached_client: LLMClient | None = None
+_cached_config_mtime: float | None = None
+
+
+def _config_mtime() -> float | None:
+    try:
+        return _CONFIG_PATH.stat().st_mtime
+    except Exception:
+        return None
+
+
+def invalidate_client_cache():
+    """Call this when phil_config.json changes (e.g., after mode switch)."""
+    global _cached_client, _cached_config_mtime
+    _cached_client = None
+    _cached_config_mtime = None
+
 
 def get_client() -> LLMClient:
     """
     Returns a ready LLMClient using the current phil_config.json.
+    Caches the instance so config is only read once per session.
+    Automatically invalidates cache if config file mtime changes.
     Use this in ai_core.py and command_bridge.py instead of importing
     the class directly — makes testing and mocking easier.
 
@@ -376,4 +403,9 @@ def get_client() -> LLMClient:
         client = get_client()
         response = client.chat(system=..., user=...)
     """
-    return LLMClient()
+    global _cached_client, _cached_config_mtime
+    current_mtime = _config_mtime()
+    if _cached_client is None or current_mtime != _cached_config_mtime:
+        _cached_client = LLMClient()
+        _cached_config_mtime = current_mtime
+    return _cached_client

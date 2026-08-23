@@ -211,6 +211,164 @@ def _build_sg90_servo_arm(p, name):
     return "\n".join(lines)
 
 
+def _build_lego_brick(p, name):
+    studs_x = p.get("studs_x", 4)
+    studs_y = p.get("studs_y", 2)
+    stud_d = p.get("stud_diameter", 4.8)
+    stud_h = p.get("stud_height", 1.8)
+    plate_h = p.get("plate_height", 9.6)
+    wall = p.get("wall_thickness", 1.2)
+    hollow = p.get("hollow", True)
+
+    # Stud spacing: studs are evenly spaced across the brick
+    # Standard LEGO: 8mm center-to-center = stud_d + gap
+    spacing = stud_d + (8.0 - stud_d)  # ~8mm center-to-center
+
+    # Overall brick dimensions
+    brick_l = studs_x * spacing
+    brick_w = studs_y * spacing
+    lines = []
+
+    # Main brick body
+    lines.append(f"{name}_body = Part.makeBox({brick_l}, {brick_w}, {plate_h})")
+
+    # Hollow out the bottom if requested
+    if hollow:
+        inner_l = brick_l - 2 * wall
+        inner_w = brick_w - 2 * wall
+        inner_h = plate_h - wall
+        lines.append(f"_{name}_inner = Part.makeBox({inner_l}, {inner_w}, {inner_h})")
+        lines.append(f"_{name}_inner.translate(App.Vector({wall}, {wall}, {wall}))")
+        lines.append(f"{name}_body = {name}_body.cut(_{name}_inner)")
+
+    # Add studs on top
+    lines.append(f"{name} = {name}_body")
+    for ix in range(studs_x):
+        for iy in range(studs_y):
+            cx = spacing / 2 + ix * spacing
+            cy = spacing / 2 + iy * spacing
+            lines.append(
+                f"_{name}_stud_{ix}_{iy} = Part.makeCylinder({stud_d / 2}, {stud_h})"
+            )
+            lines.append(
+                f"_{name}_stud_{ix}_{iy}.translate(App.Vector({cx}, {cy}, {plate_h}))"
+            )
+            lines.append(f"{name} = {name}.fuse(_{name}_stud_{ix}_{iy})")
+
+    return "\n".join(lines)
+
+
+def _build_wedge(p, name):
+    l = p.get("l", p.get("length", 20))
+    w = p.get("w", p.get("width", 10))
+    h = p.get("h", p.get("height", 10))
+    # A wedge is a box with one side cut at an angle.
+    # We create it by making a box and cutting it with a rotated box.
+    lines = [
+        f"{name}_base = Part.makeBox({l}, {w}, {h})",
+        # Cut triangle: box rotated 45 degrees to create the angled face
+        f"_{name}_cut = Part.makeBox({l}, {w * 2}, {h})",
+        f"_{name}_cut.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 45)",
+        f"_{name}_cut.translate(App.Vector(0, 0, {h}))",
+        f"{name} = {name}_base.cut(_{name}_cut)",
+    ]
+    return "\n".join(lines)
+
+
+def _build_frame(p, name):
+    """Build a rectangular frame (hollow rectangle with 4 bars).
+
+    Parameters:
+        inner_width  - width of the inner opening (default 80mm)
+        inner_height - height of the inner opening (default 60mm)
+        border_width - width of the frame border (default 3mm)
+        depth        - depth/thickness of the frame (default 2mm)
+    """
+    iw = p.get("inner_width", 80)
+    ih = p.get("inner_height", 60)
+    bw = p.get("border_width", 3)
+    d = p.get("depth", 2)
+
+    # Outer dimensions = inner + 2 * border
+    ow = iw + 2 * bw
+    oh = ih + 2 * bw
+
+    lines = [
+        f"# Frame: outer {ow}x{oh}x{d}, inner opening {iw}x{ih}",
+        f"{name}_outer = Part.makeBox({ow}, {oh}, {d})",
+        f"{name}_inner = Part.makeBox({iw}, {ih}, {d})",
+        f"{name}_inner.translate(App.Vector({bw}, {bw}, 0))",
+        f"{name} = {name}_outer.cut({name}_inner)",
+    ]
+    return "\n".join(lines)
+
+
+def _build_panel(p, name):
+    """Build a flat panel, optionally with a raised border.
+
+    Parameters:
+        width            - width of the panel (default 100mm)
+        height           - height of the panel (default 80mm)
+        thickness        - thickness of the panel base (default 2mm)
+        border_width     - width of the border (0 = no border, default 0)
+        border_protrusion - how much the border sticks out above the panel (default 1mm)
+    """
+    w = p.get("width", 100)
+    h = p.get("height", 80)
+    t = p.get("thickness", 2)
+    bw = p.get("border_width", 0)
+    bp = p.get("border_protrusion", 1)
+
+    lines = [
+        f"# Panel: {w}x{h}x{t}",
+        f"{name} = Part.makeBox({w}, {h}, {t})",
+    ]
+
+    # Add border if specified
+    if bw > 0:
+        lines.extend([
+            f"# Border: {bw}mm wide, protruding {bp}mm",
+            f"{name}_border_outer = Part.makeBox({w}, {h}, {t + bp})",
+            f"{name}_border_inner = Part.makeBox({w - 2*bw}, {h - 2*bw}, {t + bp})",
+            f"{name}_border_inner.translate(App.Vector({bw}, {bw}, 0))",
+            f"{name}_border = {name}_border_outer.cut({name}_border_inner)",
+            f"{name} = {name}.fuse({name}_border)",
+        ])
+
+    return "\n".join(lines)
+
+
+def _build_cork_board(p, name):
+    """Build a cork board panel with a frame border.
+
+    Parameters:
+        width            - width of the board (default 900mm / 90cm)
+        height           - height of the board (default 600mm / 60cm)
+        thickness        - thickness of the cork panel (default 20mm / 2cm)
+        frame_width      - width of the frame border (default 30mm / 3cm)
+        frame_protrusion - how much the frame sticks out (default 10mm / 1cm)
+    """
+    w = p.get("width", 900)
+    h = p.get("height", 600)
+    t = p.get("thickness", 20)
+    fw = p.get("frame_width", 30)
+    fp = p.get("frame_protrusion", 10)
+
+    lines = [
+        f"# Cork board: {w}x{h}x{t} with {fw}mm frame",
+        f"# Panel (cork)",
+        f"{name}_panel = Part.makeBox({w}, {h}, {t})",
+        f"# Frame (wood border)",
+        f"{name}_frame_outer = Part.makeBox({w + 2*fw}, {h + 2*fw}, {t + fp})",
+        f"{name}_frame_inner = Part.makeBox({w}, {h}, {t + fp})",
+        f"{name}_frame_inner.translate(App.Vector({fw}, {fw}, 0))",
+        f"{name}_frame = {name}_frame_outer.cut({name}_frame_inner)",
+        f"# Combine panel and frame",
+        f"{name} = {name}_panel.fuse({name}_frame)",
+    ]
+    return "\n".join(lines)
+
+
 PRIMITIVE_BUILDERS = {
     "box": _build_box,
     "cylinder": _build_cylinder,
@@ -225,6 +383,11 @@ PRIMITIVE_BUILDERS = {
     "shaft": _build_shaft,
     "spur_gear": _build_spur_gear,
     "sg90_servo_arm": _build_sg90_servo_arm,
+    "lego_brick": _build_lego_brick,
+    "wedge": _build_wedge,
+    "frame": _build_frame,
+    "panel": _build_panel,
+    "cork_board": _build_cork_board,
 }
 
 
@@ -334,13 +497,14 @@ def json_to_freecad(json_spec: dict) -> str:
         if builder:
             lines.append(builder(part, name))
         else:
+            print(f"[Builder] WARNING: Unknown type '{ptype}' — falling back to 10x10x10 box")
             lines.append(f"{name} = Part.makeBox(10,10,10)")
 
         lines.extend(_build_transforms(part, name))
         lines.extend(_build_finish_ops(part, name))
         lines.append("")
 
-    operations = json_spec.get("operations", [{"type": "fuse_all"}])
+    operations = json_spec.get("operations") or [{"type": "fuse_all"}]
     lines.extend(_build_boolean(operations, part_names))
 
     lines += [
@@ -348,7 +512,9 @@ def json_to_freecad(json_spec: dict) -> str:
         "feature = doc.addObject('Part::Feature', 'Shape')",
         "feature.Shape = final_shape",
         "doc.recompute()",
-        f"feature.Shape.exportStep('{ai_gen_folder}/model.step')",
+        "from pathlib import Path",
+        "_step_out = Path(__file__).resolve().parent / 'model.step'",
+        "feature.Shape.exportStep(str(_step_out))",
     ]
 
     return "\n".join(lines)

@@ -22,7 +22,10 @@ part.Shape = box
 
 # saving it as .step file 
 # .step file is universal 3d model works in all software
-output_path = "/Users/enoch/Desktop/Free_Cad_Extension/voice_input/output/box.step"
+from pathlib import Path
+_output_dir = Path(__file__).resolve().parent.parent / "output"
+_output_dir.mkdir(parents=True, exist_ok=True)
+output_path = str(_output_dir / "box.step")
 part.Shape.exportStep(output_path)
 
 print("Sucess!, Saved to",output_path)

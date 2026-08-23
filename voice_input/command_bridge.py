@@ -37,7 +37,7 @@ def process_command(user_input: str, status_callback=None) -> bool:
         return False
 
     report("Sending to AI…")
-    generated_script = translator(user_input)
+    generated_script = translator(user_input, status_callback=status_callback)
 
     if not generated_script:
         report("AI failed to generate a script.")
@@ -53,24 +53,3 @@ def process_command(user_input: str, status_callback=None) -> bool:
     if success:
         report("All done!")
     return success
-
-
-def self_corrector(script_path, error_message):
-    with open(script_path, "r") as file:
-        error_code = file.read()
-
-    # LLMClient.chat() takes system + user and returns a plain string
-    # works for both local (ollama) and API mode automatically
-    raw_fix = get_client().chat(
-        system="You are a FreeCAD Python debugger. Return ONLY raw Python code. No explanation, no markdown.",
-        user=(
-            f"The following FreeCAD script failed with an error.\n"
-            f"ERROR: {error_message}\n"
-            f"FAILED CODE:\n{error_code}\n"
-            f"Return ONLY the corrected Python code."
-        ),
-    )
-
-    # Strip any markdown the model may have added
-    clean_fix = raw_fix.replace("```python", "").replace("```", "").strip()
-    return clean_fix

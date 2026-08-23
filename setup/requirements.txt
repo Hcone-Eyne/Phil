@@ -1,0 +1,15 @@
+# Phil setup — shared dependencies (installed during setup loading)
+customtkinter
+pillow
+SpeechRecognition
+pyaudio
+ollama
+openai
+anthropic
+google-generativeai
+
+# API provider SDKs are bundled for packaged builds:
+#   anthropic          → pip install anthropic
+#   openai             → pip install openai
+#   gemini             → pip install google-generativeai
+#   openrouter         → pip install openai  (same SDK, different base URL)

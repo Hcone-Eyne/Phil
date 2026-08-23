@@ -28,19 +28,22 @@ def generate_snippet():
     # then gets removed after widget is closed
 
     # 1.create snippet script
+    # Use raw strings and escape single quotes to prevent path injection
+    safe_folder = str(ai_gen_folder).replace("'", "\\'")
+    safe_path = str(snippet_path).replace("'", "\\'")
     snippet_script_content = f"""
 import FreeCAD as App
 import Part
 import FreeCADGui
 
-App.loadFile('{ai_gen_folder}/model.step')
+App.loadFile('{safe_folder}/model.step')
 doc = App.activeDocument()
 FreeCADGui.showMainWindow()
 FreeCADGui.updateGui()
 view = FreeCADGui.activeDocument().activeView()
 view.viewIsometric()
 view.fitAll()
-view.saveImage('{snippet_path}', 400, 300, '#1a1a1a')
+view.saveImage('{safe_path}', 400, 300, '#1a1a1a')
 print("Thumbnail saved")
 """
         

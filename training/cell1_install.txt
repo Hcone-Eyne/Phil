@@ -1,0 +1,9 @@
+# CELL 1: Install Dependencies (Colab-specific)
+# Run this cell FIRST. Takes ~3-5 minutes.
+
+!pip install -q unsloth
+!pip install -q --upgrade transformers datasets accelerate peft trl bitsandbytes
+!pip install -q huggingface_hub
+!pip install -q cadquery
+
+print("Dependencies installed (including CadQuery)")

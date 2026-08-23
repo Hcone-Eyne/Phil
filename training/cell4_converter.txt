@@ -1,0 +1,287 @@
+# CELL 4: CadQuery to FreeCAD Converter + Tokenizer
+# Single-process only (CadQuery OCP cannot be pickled for multiprocessing)
+
+import cadquery as cq
+import ast
+import json
+import traceback
+
+MAX_SEQ_LENGTH = 2048
+
+# -- CadQuery execution (single-process safe) --
+
+def _safe_execute_cadquery(code):
+    try:
+        namespace = {"cq": cq, "cadquery": cq}
+        exec(code, namespace)
+        for var in ("result", "solid", "shape", "obj"):
+            if var in namespace:
+                return namespace[var]
+        for val in namespace.values():
+            if isinstance(val, cq.Workplane):
+                return val
+        return None
+    except Exception as e:
+        print(f"  CadQuery execution failed: {e}")
+        return None
+
+def _get_bb(shape):
+    try:
+        bb = shape.val().BoundingBox()
+        return (bb.xlen, bb.ylen, bb.zlen)
+    except Exception:
+        return None
+
+def _is_cylinder(shape):
+    try:
+        faces = shape.faces().vals()
+        if len(faces) == 3:
+            for face in faces:
+                if hasattr(face, "geomType") and face.geomType() == "CYLINDER":
+                    return True
+    except Exception:
+        pass
+    return False
+
+def _is_sphere(shape):
+    try:
+        faces = shape.faces().vals()
+        if len(faces) == 1:
+            if hasattr(faces[0], "geomType") and faces[0].geomType() == "SPHERE":
+                return True
+    except Exception:
+        pass
+    return False
+
+def _detect_primitives(shape):
+    parts = []
+    bb = _get_bb(shape)
+    if bb is None:
+        return parts
+    x, y, z = bb
+    if _is_sphere(shape):
+        r = max(x, y, z) / 2
+        parts.append({"type": "sphere", "name": "sphere_0", "r": round(r, 4)})
+        return parts
+    if _is_cylinder(shape):
+        if x == y:
+            r, h = x / 2, z
+        elif x == z:
+            r, h = x / 2, y
+        else:
+            r, h = y / 2, x
+        parts.append({"type": "cylinder", "name": "cylinder_0", "r": round(r, 4), "h": round(h, 4)})
+        return parts
+    parts.append({"type": "box", "name": "part_0", "l": round(x, 4), "w": round(y, 4), "h": round(h, 4)})
+    return parts
+
+# -- AST fallback (enhanced) --
+
+def _eval_num(node):
+    """Evaluate numeric expression from AST node."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return -_eval_num(node.operand)
+    if isinstance(node, ast.BinOp):
+        left, right = _eval_num(node.left), _eval_num(node.right)
+        if isinstance(node.op, ast.Add): return left + right
+        if isinstance(node.op, ast.Sub): return left - right
+        if isinstance(node.op, ast.Mult): return left * right
+        if isinstance(node.op, ast.Div): return left / right if right != 0 else 0
+        if isinstance(node.op, ast.Pow): return left ** right
+    raise ValueError("Cannot evaluate node")
+
+def _safe_eval_num(node):
+    """Safely evaluate numeric expression, return None on failure."""
+    try:
+        return _eval_num(node)
+    except Exception:
+        return None
+
+def _get_keyword_args(call_node):
+    """Extract keyword arguments from a function call as a dict."""
+    kwargs = {}
+    for kw in call_node.keywords:
+        if kw.arg:
+            val = _safe_eval_num(kw.value)
+            if val is not None:
+                kwargs[kw.arg] = val
+    return kwargs
+
+def _extract_from_ast(code):
+    """Extract parts and operations from CadQuery code using AST analysis."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        print(f"  AST parse error: {e}")
+        return None
+
+    parts = []
+    ops = []
+    part_names = {}  # Track variable names -> part names
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+
+        # Get method name
+        method_name = None
+        if isinstance(node.func, ast.Attribute):
+            method_name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            method_name = node.func.id
+
+        if method_name is None:
+            continue
+
+        # Extract box primitives
+        if method_name == "box":
+            args = node.args
+            kwargs = _get_keyword_args(node)
+
+            # Try positional args first
+            if len(args) >= 3:
+                l, w, h = _eval_num(args[0]), _eval_num(args[1]), _eval_num(args[2])
+                parts.append({"type": "box", "name": f"box_{len(parts)}", "l": l, "w": w, "h": h})
+            # Try keyword args
+            elif "length" in kwargs and "width" in kwargs and "height" in kwargs:
+                parts.append({"type": "box", "name": f"box_{len(parts)}",
+                            "l": kwargs["length"], "w": kwargs["width"], "h": kwargs["height"]})
+            elif "l" in kwargs and "w" in kwargs and "h" in kwargs:
+                parts.append({"type": "box", "name": f"box_{len(parts)}",
+                            "l": kwargs["l"], "w": kwargs["w"], "h": kwargs["h"]})
+            elif len(args) >= 3:
+                l, w, h = _eval_num(args[0]), _eval_num(args[1]), _eval_num(args[2])
+                parts.append({"type": "box", "name": f"box_{len(parts)}", "l": l, "w": w, "h": h})
+
+        # Extract cylinder primitives
+        elif method_name == "cylinder":
+            args = node.args
+            kwargs = _get_keyword_args(node)
+
+            if len(args) >= 2:
+                h, r = _eval_num(args[0]), _eval_num(args[1])
+                parts.append({"type": "cylinder", "name": f"cyl_{len(parts)}", "r": r, "h": h})
+            elif "h" in kwargs and "r" in kwargs:
+                parts.append({"type": "cylinder", "name": f"cyl_{len(parts)}",
+                            "r": kwargs["r"], "h": kwargs["h"]})
+            elif "height" in kwargs and "radius" in kwargs:
+                parts.append({"type": "cylinder", "name": f"cyl_{len(parts)}",
+                            "r": kwargs["radius"], "h": kwargs["height"]})
+
+        # Extract sphere primitives
+        elif method_name == "sphere":
+            args = node.args
+            kwargs = _get_keyword_args(node)
+
+            if len(args) >= 1:
+                r = _eval_num(args[0])
+                parts.append({"type": "sphere", "name": f"sph_{len(parts)}", "r": r})
+            elif "r" in kwargs:
+                parts.append({"type": "sphere", "name": f"sph_{len(parts)}", "r": kwargs["r"]})
+            elif "radius" in kwargs:
+                parts.append({"type": "sphere", "name": f"sph_{len(parts)}", "r": kwargs["radius"]})
+
+        # Extract cylinder from Cylinder() constructor
+        elif method_name == "Cylinder":
+            args = node.args
+            kwargs = _get_keyword_args(node)
+
+            if len(args) >= 2:
+                h, r = _eval_num(args[0]), _eval_num(args[1])
+                parts.append({"type": "cylinder", "name": f"cyl_{len(parts)}", "r": r, "h": h})
+            elif "h" in kwargs and "r" in kwargs:
+                parts.append({"type": "cylinder", "name": f"cyl_{len(parts)}",
+                            "r": kwargs["r"], "h": kwargs["h"]})
+
+        # Detect cut operations
+        elif method_name == "cut":
+            if len(parts) >= 2 and not ops:
+                ops.append({"type": "cut", "base": parts[0]["name"], "cutters": [p["name"] for p in parts[1:]]})
+
+        # Detect union/fuse operations
+        elif method_name in ("union", "fuse"):
+            if len(parts) >= 2 and not ops:
+                ops.append({"type": "fuse_all"})
+
+        # Detect fillet operations
+        elif method_name == "fillet":
+            if parts:
+                radius = _safe_eval_num(node.args[0]) if node.args else None
+                if radius is None:
+                    kwargs = _get_keyword_args(node)
+                    radius = kwargs.get("r", kwargs.get("radius"))
+                if radius is not None:
+                    ops.append({"type": "fillet", "part": parts[-1]["name"], "radius": radius})
+
+        # Detect chamfer operations
+        elif method_name == "chamfer":
+            if parts:
+                distance = _safe_eval_num(node.args[0]) if node.args else None
+                if distance is None:
+                    kwargs = _get_keyword_args(node)
+                    distance = kwargs.get("d", kwargs.get("distance"))
+                if distance is not None:
+                    ops.append({"type": "chamfer", "part": parts[-1]["name"], "distance": distance})
+
+    if not parts:
+        return None
+
+    # Default operation if none detected
+    if not ops:
+        if len(parts) == 1:
+            ops.append({"type": "assign", "part": parts[0]["name"]})
+        else:
+            ops.append({"type": "fuse_all"})
+
+    return {"parts": parts, "operations": ops}
+
+# -- Main converter --
+
+def convert_cadquery(code):
+    """Convert CadQuery code to FreeCAD JSON spec."""
+    if not code or not code.strip():
+        return None
+
+    # Try CadQuery execution first
+    shape = _safe_execute_cadquery(code)
+    if shape is not None:
+        parts = _detect_primitives(shape)
+        if parts:
+            if len(parts) == 1:
+                ops = [{"type": "assign", "part": parts[0]["name"]}]
+            else:
+                ops = [{"type": "fuse_all"}]
+            return {"parts": parts, "operations": ops}
+
+    # Fallback to AST analysis
+    return _extract_from_ast(code)
+
+def validate_json_spec(spec):
+    """Validate JSON spec structure."""
+    if spec is None:
+        return False
+    if not isinstance(spec, dict):
+        return False
+    if "parts" not in spec or not isinstance(spec["parts"], list):
+        return False
+    if "operations" not in spec or not isinstance(spec["operations"], list):
+        return False
+    for part in spec["parts"]:
+        if not isinstance(part, dict) or "type" not in part or "name" not in part:
+            return False
+    return True
+
+# -- System prompt --
+
+SYSTEM_PROMPT = (
+    "You are a FreeCAD 3D model spec generator.\n"
+    "Output ONLY a raw JSON object with these keys:\n"
+    '- "parts": list of primitives (box, cylinder, sphere, etc.)\n'
+    '- "operations": list of boolean operations (cut, fuse_all, assign)\n'
+    "NO thoughts, NO steps, NO markdown, NO backticks.\n"
+    "Start with { and end with }."
+)
+
+print("Converter loaded successfully.")

@@ -19,9 +19,12 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
+import sys
 import webbrowser
+import importlib.util
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 
 ProgressCallback = Callable[[str], None]
@@ -29,12 +32,88 @@ ProgressCallback = Callable[[str], None]
 DEFAULT_MODEL = "qwen2.5-coder:7b"
 OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 
+_SETUP_DIR = Path(__file__).resolve().parent
+_REQUIREMENTS_FILE = _SETUP_DIR / "requirements.txt"
+
+# Pip package for each API provider slug (matches setup_screen / llm_client)
+API_PROVIDER_PACKAGES: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "gemini": "google-generativeai",
+    "openrouter": "openai",
+}
+
+PACKAGE_IMPORTS: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "google-generativeai": "google.generativeai",
+    "ollama": "ollama",
+}
+
 
 @dataclass(frozen=True)
 class InstallResult:
     ok: bool
     detail: str
     command: list[str] | None = None
+
+
+def install_setup_requirements(
+    progress_callback: ProgressCallback | None = None,
+) -> InstallResult:
+    """Install shared packages from setup/requirements.txt."""
+    if _running_frozen():
+        return InstallResult(ok=True, detail="Shared dependencies are bundled with Phil.")
+
+    if not _REQUIREMENTS_FILE.exists():
+        return InstallResult(ok=False, detail=f"Missing requirements file: {_REQUIREMENTS_FILE}")
+
+    _progress(progress_callback, "Installing shared Python dependencies…")
+    command = [sys.executable, "-m", "pip", "install", "-r", str(_REQUIREMENTS_FILE)]
+    ok = _run_streaming_command(command, progress_callback)
+    return InstallResult(
+        ok=ok,
+        detail="Shared dependencies installed." if ok else "Failed to install shared dependencies.",
+        command=command,
+    )
+
+
+def install_api_provider_package(
+    provider: str,
+    progress_callback: ProgressCallback | None = None,
+) -> InstallResult:
+    """Install the SDK pip package for the chosen API provider."""
+    package = API_PROVIDER_PACKAGES.get(provider.lower().strip())
+    if not package:
+        return InstallResult(
+            ok=False,
+            detail=f"Unknown API provider '{provider}'. Supported: {', '.join(API_PROVIDER_PACKAGES)}",
+        )
+    return pip_install_package(package, progress_callback)
+
+
+def pip_install_package(
+    package: str,
+    progress_callback: ProgressCallback | None = None,
+) -> InstallResult:
+    """Install a single pip package into the current interpreter."""
+    if _running_frozen():
+        module_name = PACKAGE_IMPORTS.get(package, package.replace("-", "_"))
+        if importlib.util.find_spec(module_name) is not None:
+            return InstallResult(ok=True, detail=f"{package} is bundled with Phil.")
+        return InstallResult(
+            ok=False,
+            detail=f"{package} is not bundled in this Phil build. Rebuild the app with this dependency included.",
+        )
+
+    _progress(progress_callback, f"Installing {package}…")
+    command = [sys.executable, "-m", "pip", "install", package]
+    ok = _run_streaming_command(command, progress_callback)
+    return InstallResult(
+        ok=ok,
+        detail=f"{package} installed." if ok else f"Failed to install {package}.",
+        command=command,
+    )
 
 
 def install_ollama(
@@ -222,6 +301,10 @@ def _progress(progress_callback: ProgressCallback | None, message: str) -> None:
     print(f"[Installer] {message}")
     if progress_callback:
         progress_callback(message)
+
+
+def _running_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
 
 if __name__ == "__main__":

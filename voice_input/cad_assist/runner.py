@@ -12,7 +12,7 @@ import ast
 
 from voice_input.Keys.config import (
     output_location, script_location, logs_location,
-    free_cad_cmd, ai_gen_script, ai_gen_folder
+    free_cad_cmd, ai_gen_script, ai_gen_folder, correction_log_path,
 )
 
 # Ensure output and log folders exist
@@ -23,12 +23,40 @@ for folder in [output_location, logs_location]:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def self_corrector(script_path, error_message):
+    """Ask the LLM to fix a failing script."""
+    from setup.llm_client import get_client
+
+    with open(script_path, "r") as file:
+        error_code = file.read()
+
+    raw_fix = get_client().chat(
+        system="You are a FreeCAD Python debugger. Return ONLY raw Python code. No explanation, no markdown.",
+        user=(
+            f"The following FreeCAD script failed with an error.\n"
+            f"ERROR: {error_message}\n"
+            f"FAILED CODE:\n{error_code}\n"
+            f"Return ONLY the corrected Python code."
+        ),
+    )
+
+    clean_fix = raw_fix.replace("```python", "").replace("```", "").strip()
+
+    if not clean_fix:
+        raise ValueError("LLM returned empty correction — keeping original script")
+
+    return clean_fix
+
+
 def defense_wall(script_path):
     with open(script_path, "r") as file:
         lines = file.readlines()
 
     cleaned_lines = []
-    forbidden = [".remove(", "ActiveDocument.removeObject", "del "]
+    # Only block genuinely dangerous operations that could corrupt the FreeCAD document.
+    # NOTE: "del " is intentionally NOT blocked — it catches legitimate Python cleanup
+    # (del some_variable). Only block explicit document object removal via API.
+    forbidden = ["ActiveDocument.removeObject"]
     for line in lines:
         if any(key in line for key in forbidden):
             continue
@@ -59,13 +87,36 @@ def correction_runner(script_path):
 
 
 def script_verifier(result):
-    return (
-        result.returncode == 0
-        and "Exception" not in result.stderr
-        and "Error"     not in result.stderr
-        and "Exception" not in result.stdout
-        and "Error"     not in result.stdout
-    )
+    """Check if FreeCAD script execution succeeded.
+    
+    Returns True only if return code is 0 AND no actual exception traceback
+    appears in output. Avoids false positives from FreeCAD warnings containing
+    'Error' or 'Exception' as substrings.
+    """
+    if result.returncode != 0:
+        return False
+    
+    # Check for actual Python tracebacks / FreeCAD exception patterns,
+    # not just substring matches on "Error" or "Exception"
+    import re
+    error_patterns = [
+        r"Traceback \(most recent call last\)",
+        r"^Error:",
+        r"^Exception:",
+        r"RuntimeError:",
+        r"AttributeError:",
+        r"TypeError:",
+        r"ValueError:",
+        r"NameError:",
+        r"SyntaxError:",
+    ]
+    
+    combined = (result.stdout or "") + "\n" + (result.stderr or "")
+    for pattern in error_patterns:
+        if re.search(pattern, combined, re.MULTILINE):
+            return False
+    
+    return True
 
 
 def error_catcher(result):
@@ -92,11 +143,9 @@ def execute_cad_scripts(script_name, user_request, status_callback=None):
         if status_callback:
             status_callback(msg)
 
-    from voice_input.command_bridge import self_corrector
-
     script_path_use = ai_gen_folder / script_name
     log_report      = logs_location / "error.report.txt"
-    correction_log  = logs_location / "correction.log.txt"
+    correction_log = correction_log_path
 
     # ── Step 1: Defense wall (syntax check) ───────────────────────────────────
     report("Checking script…")
@@ -104,7 +153,6 @@ def execute_cad_scripts(script_name, user_request, status_callback=None):
         report("Syntax error — cannot run script")
         with open(log_report, "a") as f:
             f.write(f"Syntax_Error in {script_name}\n")
-            f.write(traceback.format_exc())
         return False
 
     # ── Step 2: First run ─────────────────────────────────────────────────────

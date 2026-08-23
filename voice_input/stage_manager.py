@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 from voice_input.Keys.config import memory_path
 
-# locating memory folder for ai
-memory_path = memory_path
+# Max history entries to prevent unbounded growth (exceeds LLM token limits)
+MAX_HISTORY = 20
 
 ''' Improved script saver: Now it can track sequence of prompts '''
 
@@ -34,7 +34,7 @@ def script_saver(script_name, script_content, user_prompt, parameters = {"key":"
             with open(memory_path, "r") as file:
                 old_info = json.load(file)  
                 previous_conv = old_info.get("history",[])
-        except:
+        except (json.JSONDecodeError, OSError, KeyError):
             previous_conv = []
     
     # this add new prompt / interaction with ai to info list
@@ -43,6 +43,10 @@ def script_saver(script_name, script_content, user_prompt, parameters = {"key":"
         "code_segment":script_content
     }
     previous_conv.append(new_prompt)
+
+    # Trim history to prevent unbounded growth
+    if len(previous_conv) > MAX_HISTORY:
+        previous_conv = previous_conv[-MAX_HISTORY:]
     
     # this stores current use script details so ai can modify it
     store_data = {
@@ -63,14 +67,8 @@ def script_saver(script_name, script_content, user_prompt, parameters = {"key":"
 # load the memory to ai
 def load_memory():
     ''' this retrives the last known script from the memory '''
-    try:
-        # check if memory path exitts
-        if not memory_path.exists():
-            print("memory path isn't exists yet")
-            return None
-    except Exception as e:
-        # FIX: missing f-prefix meant {e} printed literally
-        print(f"Memory is either empty or corrupted:\n{e}")
+    if not memory_path.exists():
+        print("memory path isn't exists yet")
         return None
 
     # checking file is empthy before reading
@@ -79,9 +77,12 @@ def load_memory():
         return None
 
     # after check of memory isn't empty load it
-    with open(memory_path,"r") as file:
-        # load memory
-        return json.load(file)
+    try:
+        with open(memory_path,"r") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, OSError):
+        print("[Memory] Corrupted — resetting")
+        return None
 
 ''' improved get_memory for ai '''
 # getting last memory for ai to read and process futher

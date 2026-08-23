@@ -1,0 +1,16 @@
+{
+  "request": "make a cube",
+  "description": "make a cube",
+  "spec": {
+    "parts": [
+      {
+        "type": "box",
+        "name": "cube",
+        "l": 1,
+        "w": 1,
+        "h": 1
+      }
+    ],
+    "operations": []
+  }
+}
