@@ -65,6 +65,28 @@ class CadGenerationTests(unittest.TestCase):
         self.assertIn("final_shape = outer_body.cut(inner_cavity).cut(shaft_hole_1).cut(shaft_hole_2)", code)
         self.assertNotIn("shaft = Part.makeCylinder", code)
 
+    def test_bare_asset_type_from_llm_expands_to_spur_gear(self):
+        spec = {
+            "parts": [{"type": "ten_tooth_gear", "name": "gear_5mm"}],
+            "operations": [],
+        }
+        expanded = ai_core._expand_asset_references(spec)
+        code = json_to_freecad(expanded)
+        ast.parse(code)
+        self.assertIn("gear_5mm = Part.Face", code)
+        self.assertIn("for i in range(10)", code)
+        self.assertIn("final_shape = gear_5mm", code)
+        self.assertNotIn("Part.makeBox(10,10,10)", code)
+
+    def test_empty_operations_defaults_to_fuse_all(self):
+        code = json_to_freecad({
+            "parts": [{"type": "cylinder", "name": "pin", "r": 2, "h": 8}],
+            "operations": [],
+        })
+        ast.parse(code)
+        self.assertIn("final_shape = pin", code)
+        self.assertNotIn("final_shape = Part.makeBox(1,1,1)", code)
+
     def test_generated_asset_library_is_added_to_prompt(self):
         original_path = ai_core._GENERATED_ASSET_LIBRARY_PATH
         try:

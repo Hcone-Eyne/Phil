@@ -1,24 +1,16 @@
 {
-  "request": "make a gear with 20 diameter",
-  "description": "Make a 20 mm outside-diameter spur gear with exactly 16 teeth and 5 mm thickness.",
+  "request": "make a cube",
+  "description": "make a cube",
   "spec": {
-    "description": "Make a 20 mm outside-diameter spur gear with exactly 16 teeth and 5 mm thickness.",
     "parts": [
       {
-        "type": "spur_gear",
-        "name": "spur_gear",
-        "diameter": 20,
-        "root_diameter": 15.600000000000001,
-        "teeth": 16,
-        "thickness": 5,
-        "bore_diameter": 4.4
+        "type": "box",
+        "name": "cube",
+        "l": 1,
+        "w": 1,
+        "h": 1
       }
     ],
-    "operations": [
-      {
-        "type": "assign",
-        "part": "spur_gear"
-      }
-    ]
+    "operations": []
   }
 }

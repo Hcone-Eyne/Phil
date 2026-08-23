@@ -1,0 +1,64 @@
+# CELL 8: Evaluation + Test Generation
+
+print("Loading fine-tuned model from Drive...")
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name=FINAL_DIR,
+    max_seq_length=MAX_SEQ_LENGTH,
+    dtype=None,
+    load_in_4bit=True,
+)
+FastLanguageModel.for_inference(model)
+print("Model loaded for inference")
+
+test_prompts = [
+    "Make a box 10 by 20 by 30 mm",
+    "Create a cylinder 50mm tall 10mm radius",
+    "Make a sphere radius 15mm",
+    "Create an L bracket 30mm wide 20mm tall",
+    "Make a flange outer diameter 30 inner bore 10",
+]
+
+print("\n=== Test Generation ===\n")
+
+for prompt in test_prompts:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    outputs = model.generate(
+        input_ids=inputs,
+        max_new_tokens=512,
+        temperature=0.1,
+        top_p=0.95,
+        use_cache=True,
+    )
+
+    response = tokenizer.decode(outputs[0][inputs.shape[-1]:], skip_special_tokens=True)
+
+    try:
+        spec = json.loads(response)
+        if "parts" in spec and "operations" in spec:
+            valid = "PASS"
+        else:
+            valid = "FAIL (missing keys)"
+    except json.JSONDecodeError:
+        valid = "FAIL (invalid JSON)"
+
+    print(f"Prompt: {prompt}")
+    print(f"Result: {valid}")
+    print(f"Response: {response[:200]}...")
+    print("-" * 60)
+
+gc.collect()
+torch.cuda.empty_cache()
+print(f"\nVRAM freed. Final usage: {torch.cuda.memory_allocated()/1024**3:.1f} GB")
+print("\n=== Pipeline Complete ===")
+print(f"Adapter saved to: {FINAL_DIR}")

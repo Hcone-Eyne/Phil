@@ -1,0 +1,35 @@
+# CELL 6: Load Model + QLoRA Adapter
+
+from unsloth import FastLanguageModel
+from transformers import TrainingArguments, Trainer
+
+LORA_RANK = 16
+
+print("Loading Qwen2.5-Coder-3B-Instruct in 4-bit (QLoRA)...")
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit",
+    max_seq_length=MAX_SEQ_LENGTH,
+    dtype=None,
+    load_in_4bit=True,
+)
+
+print("Attaching LoRA adapter...")
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=LORA_RANK,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_alpha=16,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
+    random_state=3407,
+)
+
+gpu_mem_used = torch.cuda.memory_allocated() / 1024**3
+gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+print(f"Model loaded: {gpu_mem_used:.1f} GB / {gpu_mem_total:.1f} GB VRAM")
+print(f"LoRA rank: {LORA_RANK}")
+print(f"Max sequence length: {MAX_SEQ_LENGTH}")

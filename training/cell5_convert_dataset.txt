@@ -1,0 +1,181 @@
+# CELL 5: Convert + Format (NO multiprocessing, with checkpointing)
+# Saves progress to avoid restarting from scratch
+
+import gc
+import json
+import os
+import traceback
+import torch
+from pathlib import Path
+from datasets import Dataset
+from transformers import AutoTokenizer
+
+# -- Import converter from Cell 4 --
+# Assumes convert_cadquery, validate_json_spec, SYSTEM_PROMPT are defined in Cell 4
+# If running cells separately, copy those definitions here
+
+# -- HF Token (optional, for faster downloads) --
+try:
+    from google.colab import userdata
+    HF_TOKEN = userdata.get("HF_TOKEN") or os.environ.get("HF_TOKEN")
+except Exception:
+    HF_TOKEN = os.environ.get("HF_TOKEN")
+
+# -- Tokenizer --
+tokenizer = AutoTokenizer.from_pretrained(
+    "Qwen/Qwen2.5-Coder-3B-Instruct",
+    trust_remote_code=True,
+    token=HF_TOKEN if HF_TOKEN else None,
+)
+
+MAX_SEQ_LENGTH = 2048
+
+# -- Checkpoint path --
+CONVERT_CHECKPOINT = Path("/content/convert_checkpoint.json")
+
+# -- Convert list to HuggingFace Dataset --
+print("Converting to HuggingFace Dataset...")
+hf_dataset = Dataset.from_list(dataset_list)
+print(f"Dataset: {len(hf_dataset)} samples")
+print(f"Dataset columns: {hf_dataset.column_names}")
+
+# -- Debug: Show first sample --
+if len(hf_dataset) > 0:
+    sample = hf_dataset[0]
+    print(f"\nSample 0 keys: {list(sample.keys())}")
+    for k, v in sample.items():
+        if isinstance(v, bytes):
+            print(f"  {k}: {v[:100]}...")
+        else:
+            print(f"  {k}: {str(v)[:100]}")
+
+# -- Combined convert + format function --
+BATCH_SIZE = 50
+
+def convert_and_format(batch_dict):
+    """
+    Convert CadQuery -> FreeCAD JSON -> formatted chat text.
+    Returns list of (formatted_text, is_valid) tuples.
+    """
+    results = []
+    codes = batch_dict.get("cadquery_file", [])
+
+    for idx, code_bytes in enumerate(codes):
+        try:
+            # Decode bytes to string
+            if isinstance(code_bytes, bytes):
+                code = code_bytes.decode("utf-8", errors="ignore")
+            else:
+                code = str(code_bytes)
+
+            if not code or not code.strip():
+                continue
+
+            # Convert
+            spec = convert_cadquery(code)
+
+            if spec is None:
+                continue
+
+            if not validate_json_spec(spec):
+                continue
+
+            # Format as chat
+            response = json.dumps(spec, indent=2)
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": "Create a 3D model based on the provided CadQuery reference."},
+                {"role": "assistant", "content": response},
+            ]
+
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+
+            if text and len(text) > 10:
+                results.append(text)
+
+        except Exception as e:
+            print(f"  Error processing sample: {e}")
+            traceback.print_exc()
+            continue
+
+    return results
+
+# -- Load checkpoint if exists --
+converted_texts = []
+dataset_idx = 0
+
+if CONVERT_CHECKPOINT.exists():
+    print(f"Found checkpoint at {CONVERT_CHECKPOINT}")
+    with open(CONVERT_CHECKPOINT, "r") as f:
+        checkpoint_data = json.load(f)
+    converted_texts = checkpoint_data.get("texts", [])
+    dataset_idx = checkpoint_data.get("dataset_idx", 0)
+    print(f"Resuming from dataset index {dataset_idx}, {len(converted_texts)} valid samples so far")
+
+# -- Convert with checkpointing --
+print(f"\n=== Converting samples {dataset_idx} to {len(hf_dataset)} ===")
+SAVE_EVERY = 200
+
+for i in range(dataset_idx, len(hf_dataset), BATCH_SIZE):
+    end_idx = min(i + BATCH_SIZE, len(hf_dataset))
+
+    # Use .select() and .to_dict() for proper batch access
+    batch = hf_dataset.select(range(i, end_idx)).to_dict()
+    batch_results = convert_and_format(batch)
+
+    # Only keep valid results
+    converted_texts.extend(batch_results)
+    dataset_idx = end_idx
+
+    # Progress
+    valid_count = len(converted_texts)
+    print(f"  Processed {dataset_idx}/{len(hf_dataset)} samples, {valid_count} valid conversions", end="\r")
+
+    # Save checkpoint and optimize memory
+    if dataset_idx % SAVE_EVERY == 0:
+        with open(CONVERT_CHECKPOINT, "w") as f:
+            json.dump({
+                "texts": converted_texts,
+                "dataset_idx": dataset_idx,
+            }, f)
+        print(f"  Checkpoint saved at dataset_idx={dataset_idx}, {valid_count} valid samples")
+
+        # Optimize GPU RAM
+        gc.collect()
+        torch.cuda.empty_cache()
+
+# Save final checkpoint
+with open(CONVERT_CHECKPOINT, "w") as f:
+    json.dump({
+        "texts": converted_texts,
+        "dataset_idx": dataset_idx,
+    }, f)
+print(f"\nConversion complete: {len(converted_texts)} valid samples from {dataset_idx} total")
+
+# -- Create dataset from converted texts --
+valid_texts = converted_texts
+print(f"Valid conversions: {len(valid_texts)}/{dataset_idx} ({len(valid_texts)/dataset_idx*100:.1f}%)")
+
+if len(valid_texts) == 0:
+    print("\nERROR: No valid conversions! Check Cell 4 converter.")
+    print("Debug steps:")
+    print("  1. Verify CadQuery is installed: import cadquery as cq; print(cq.__version__)")
+    print("  2. Test converter on first sample: convert_cadquery(hf_dataset[0]['cadquery_file'])")
+    print("  3. Check dataset column names match expected 'cadquery_file'")
+else:
+    # Create dataset
+    train_data = Dataset.from_dict({"text": valid_texts})
+    print(f"Training dataset: {len(train_data)} samples")
+
+    # Free memory
+    del hf_dataset, converted_texts
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # Show sample
+    print(f"\n--- Sample formatted text (first 500 chars) ---")
+    print(train_data[0]["text"][:500])

@@ -1,4 +1,11 @@
-"""UI animations for Phil (pulse ring on thinking state)."""
+"""UI animations for Phil (pulse ring on thinking state).
+
+Design tokens match Skills/system-design.md:
+- PulseRing uses color_gold_500 for active/processing
+- color_grey_400 for idle
+- color_error for failure state
+- No glow/blur — animate via scale/opacity only (flat-safe)
+"""
 
 from __future__ import annotations
 
@@ -14,11 +21,19 @@ class PulseRing(ctk.CTkFrame):
     def __init__(
         self,
         master,
-        color: str = "#FAB387",
+        color: str = None,
         size: int = 44,
-        bg_color: str = "#27272A",
+        bg_color: str = None,
         **kwargs,
     ):
+        # Import theme colors
+        from ui.phil_widget import phil_theme
+        
+        if color is None:
+            color = phil_theme.color_gold_500
+        if bg_color is None:
+            bg_color = phil_theme.color_bg_canvas
+            
         pad = 12
         dim = size + pad * 2
         super().__init__(master, fg_color="transparent", width=dim, height=dim, **kwargs)

@@ -1,0 +1,107 @@
+# CELL 7: Train with Checkpoints (standard Trainer, pre-tokenized data)
+# No SFTTrainer. No runtime JSON parsing. No chat template in collate_fn.
+# Saves every 500 steps to resume if disconnected.
+
+BATCH_SIZE = 8
+GRADIENT_ACCUMULATION = 4
+SAVE_STEPS = 500
+NUM_EPOCHS = 3
+
+steps_per_epoch = len(train_data) // (BATCH_SIZE * GRADIENT_ACCUMULATION)
+total_steps = steps_per_epoch * NUM_EPOCHS
+print(f"Steps per epoch: {steps_per_epoch}")
+print(f"Total training steps: {total_steps}")
+print(f"Estimated time: ~{total_steps * 4 / 60:.0f} minutes")
+
+OUTPUT_DIR = str(CHECKPOINT_ROOT / "qlora-cadquery")
+
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,
+    num_train_epochs=NUM_EPOCHS,
+    per_device_train_batch_size=BATCH_SIZE,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION,
+    learning_rate=2e-4,
+    weight_decay=0.01,
+    warmup_steps=100,
+    lr_scheduler_type="cosine",
+    fp16=True,
+    logging_steps=50,
+    save_strategy="steps",
+    save_steps=SAVE_STEPS,
+    save_total_limit=3,
+    optim="adamw_8bit",
+    seed=3407,
+    report_to="none",
+    dataloader_num_workers=0,
+    remove_unused_columns=False,
+)
+
+def collate_fn(batch):
+    """
+    Minimal collate: only tokenizes pre-formatted text.
+    No JSON parsing, no chat template application.
+    """
+    texts = [item["text"] for item in batch]
+
+    tokenized = tokenizer(
+        texts,
+        truncation=True,
+        max_length=MAX_SEQ_LENGTH,
+        padding="max_length",
+        return_tensors="pt",
+    )
+
+    labels = tokenized["input_ids"].clone()
+    labels[labels == tokenizer.pad_token_id] = -100
+
+    return {
+        "input_ids": tokenized["input_ids"],
+        "attention_mask": tokenized["attention_mask"],
+        "labels": labels,
+    }
+
+trainer = Trainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=train_data,
+    args=training_args,
+    data_collator=collate_fn,
+)
+
+# -- Auto-resume from checkpoint --
+resume_checkpoint = None
+checkpoints = sorted(Path(OUTPUT_DIR).glob("checkpoint-*")) if Path(OUTPUT_DIR).exists() else []
+if checkpoints:
+    resume_checkpoint = str(checkpoints[-1])
+    print(f"Resuming from checkpoint: {resume_checkpoint}")
+else:
+    print("Starting training from scratch")
+
+print("\n=== Starting Training ===")
+print(f"  Dataset: {len(train_data)} samples")
+print(f"  Batch: {BATCH_SIZE} x {GRADIENT_ACCUMULATION} = {BATCH_SIZE * GRADIENT_ACCUMULATION} effective")
+print(f"  Checkpoints: every {SAVE_STEPS} steps -> {OUTPUT_DIR}")
+print(f"  Press Ctrl+C to stop early (last checkpoint is saved)\n")
+
+try:
+    train_result = trainer.train(resume_from_checkpoint=resume_checkpoint)
+except KeyboardInterrupt:
+    print("\nTraining interrupted! Last checkpoint saved.")
+    print(f"Resume from: {OUTPUT_DIR}")
+except Exception as e:
+    print(f"\nTraining error: {e}")
+    print("Last checkpoint saved. Re-run to resume.")
+
+print("\n=== Training Complete ===")
+print(f"  Total steps: {train_result.global_step}")
+print(f"  Final loss: {train_result.training_loss:.4f}")
+print(f"  Training time: {train_result.metrics['train_runtime']:.0f} seconds")
+
+FINAL_DIR = str(CHECKPOINT_ROOT / "qlora-cadquery-final")
+model.save_pretrained(FINAL_DIR)
+tokenizer.save_pretrained(FINAL_DIR)
+print(f"Final adapter saved to: {FINAL_DIR}")
+
+del trainer
+gc.collect()
+torch.cuda.empty_cache()

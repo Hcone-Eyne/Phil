@@ -287,7 +287,8 @@ class Phil_Overlay(ctk.CTk):
         """User clicked the thumbnail — show generated script."""
         from voice_input.Keys.config import ai_gen_script
         try:
-            code = open(ai_gen_script).read()
+            with open(ai_gen_script) as f:
+                code = f.read()
         except Exception:
             code = "# Script not found."
         last_req   = self._last_request
@@ -336,6 +337,13 @@ class Phil_Overlay(ctk.CTk):
         can change between Local and API mode.
         After setup completes, Phil relaunches via on_complete callback.
         """
+        # Invalidate LLM client cache so new config is loaded on relaunch
+        try:
+            from setup.llm_client import invalidate_client_cache
+            invalidate_client_cache()
+        except Exception:
+            pass
+        
         self.quit()
         self.destroy()
         # Import here to avoid circular imports at module level
